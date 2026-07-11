@@ -690,6 +690,23 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 pass
         return
 
+    # Guruh/superguruh xabarlari: bot faqat @username orqali tegilganda yoki
+    # o'zining xabariga reply qilinganda javob beradi — aks holda e'tibor bermaydi.
+    if update.effective_chat.type in ("group", "supergroup"):
+        bot_username = (context.bot.username or "").lower()
+        mentioned = bool(bot_username) and f"@{bot_username}" in (text or "").lower()
+        is_reply_to_bot = (
+            update.message.reply_to_message is not None
+            and update.message.reply_to_message.from_user is not None
+            and update.message.reply_to_message.from_user.id == context.bot.id
+        )
+        if not (mentioned or is_reply_to_bot):
+            return
+        if mentioned:
+            text = re.sub(rf"@{re.escape(bot_username)}", "", text, flags=re.IGNORECASE).strip()
+        if not text:
+            return
+
     mode = user_mode.get(chat_id)
     category_map = {
         "partner": "HAMKOR SO'ROVI / PARTNER REQUEST",
