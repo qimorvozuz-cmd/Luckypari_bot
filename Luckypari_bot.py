@@ -284,7 +284,7 @@ MODEL_FACTS = {
 _ai_client = Anthropic(api_key=ANTHROPIC_API_KEY, timeout=AI_REQUEST_TIMEOUT)
 _conversation_history: dict[int, list[dict]] = defaultdict(list)
 
-TOMMY_CONTACT = "@Tommy_Luckypari"
+TOMMY_CONTACT = "@Tommy_Luckypar"
 
 SYSTEM_PROMPT = {
     "uz": (
@@ -701,12 +701,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     ai_answer = get_ai_response(chat_id, lang, text)
     urgent = is_urgent(text)
     category = category_map.get(mode, "ERKIN SAVOL / FREE QUESTION")
+    # Faqat "Boshqa savol" bo'limidan yozilgan xabarlar (yoki dolzarb mavzular) adminga yuboriladi;
+    # "Hamkorlik" va "To'lov" bo'limlarida AI mustaqil javob beradi, forward qilinmaydi.
+    should_forward = (mode == "other") or urgent
 
     if ai_answer:
         await update.message.reply_text(ai_answer, reply_markup=model_detail_kb(lang))
-        if urgent:
+        if should_forward:
+            label = "🚨 DOLZARB / URGENT" if urgent else "📩 XABAR / MESSAGE"
             await forward_to_admin(
-                context, chat_id, lang, f"🚨 DOLZARB / URGENT — {category}",
+                context, chat_id, lang, f"{label} — {category}",
                 f"Savol: {text}\n\nAI javobi: {ai_answer}",
             )
     else:
