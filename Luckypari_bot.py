@@ -62,7 +62,7 @@ ANTHROPIC_API_KEY = _require("ANTHROPIC_API_KEY")
 REGISTRATION_URL = os.environ.get("REGISTRATION_URL", "http://Luckyparipartners.com")
 
 AI_MODEL = "claude-sonnet-4-6"
-AI_MAX_TOKENS = 400
+AI_MAX_TOKENS = 280
 AI_REQUEST_TIMEOUT = 20.0
 AI_HISTORY_LIMIT = 10
 
@@ -485,6 +485,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     chat_id = update.effective_chat.id
     lang = get_lang(chat_id)
+    context.user_data["reg"] = {}
+    user_mode[chat_id] = None
     await update.message.reply_text(TEXTS[lang]["reg_cancelled"], reply_markup=main_menu_kb(lang))
     return ConversationHandler.END
 
@@ -719,7 +721,6 @@ def main() -> None:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(registration_conv)
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
