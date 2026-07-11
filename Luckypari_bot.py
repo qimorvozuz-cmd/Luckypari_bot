@@ -284,7 +284,7 @@ MODEL_FACTS = {
 _ai_client = Anthropic(api_key=ANTHROPIC_API_KEY, timeout=AI_REQUEST_TIMEOUT)
 _conversation_history: dict[int, list[dict]] = defaultdict(list)
 
-TOMMY_CONTACT = "@Tommy_Luckypar"
+TOMMY_CONTACT = "@Tommy_Luckypari"
 
 SYSTEM_PROMPT = {
     "uz": (
