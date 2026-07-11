@@ -26,17 +26,98 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from anthropic import Anthropic
 
 # ============ SOZLAMALAR ============
 BOT_TOKEN = "8930140941:AAEFk9YYH9gPANFihOEFTn4_HoIKNhjmRu8"
 ADMIN_CHAT_ID = 8211732921          # Tommy yoki admin chat ID
 REGISTRATION_URL = "http://Luckyparipartners.com"
 
+ANTHROPIC_API_KEY = "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"   # console.anthropic.com dan olinadi
+ai_client = Anthropic(api_key=ANTHROPIC_API_KEY)
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+AI_SYSTEM_PROMPT = {
+    "uz": (
+        "Sen LuckyPari affiliate dasturining AI-yordamchisisan (Tommy jamoasi nomidan). "
+        "Hamkorlarga trafik, FTD oshirish, konversiya, reklama kanallari (Telegram, Instagram, "
+        "Facebook, Google Ads, TikTok, Push/Native Ads va h.k.) bo'yicha aniq, amaliy maslahat ber. "
+        "Javobing qisqa (3-6 jumla), do'stona va professional bo'lsin. "
+        "Hech qachon aniq daromad, to'lov miqdori yoki kafolatlangan natija va'da qilma — "
+        "bunday savol bo'lsa, buni Tommy bilan individual kelishish kerakligini ayt. "
+        "Agar savol umuman aloqador bo'lmasa yoki juda maxsus (masalan aniq shartnoma, hisob muammosi) bo'lsa, "
+        "buni Tommy'ga yetkazishingni ayt."
+    ),
+    "ru": (
+        "Ты AI-ассистент партнёрской программы LuckyPari (от команды Tommy). "
+        "Дай партнёрам конкретный, практичный совет по трафику, росту FTD, конверсии, рекламным каналам "
+        "(Telegram, Instagram, Facebook, Google Ads, TikTok, Push/Native Ads и т.д.). "
+        "Ответ короткий (3-6 предложений), дружелюбный и профессиональный. "
+        "Никогда не обещай конкретный доход, суммы выплат или гарантированный результат — "
+        "если об этом спрашивают, скажи, что это согласовывается индивидуально с Tommy. "
+        "Если вопрос не по теме или слишком специфичен (конкретный договор, проблема с аккаунтом), "
+        "скажи, что передашь это Tommy."
+    ),
+    "en": (
+        "You are the AI assistant of the LuckyPari affiliate program (on behalf of Tommy's team). "
+        "Give partners concrete, practical advice on traffic, increasing FTDs, conversion, and ad channels "
+        "(Telegram, Instagram, Facebook, Google Ads, TikTok, Push/Native Ads, etc). "
+        "Keep answers short (3-6 sentences), friendly and professional. "
+        "Never promise specific income, payment amounts, or guaranteed results — "
+        "if asked, say those terms are agreed individually with Tommy. "
+        "If the question is unrelated or too specific (a particular contract, account issue), "
+        "say you'll pass it on to Tommy."
+    ),
+}
+
+
+def get_ai_advice(question: str, lang: str) -> str:
+    """Anthropic API orqali savolga mavzuga mos, real maslahat oladi."""
+    try:
+        response = ai_client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=400,
+            system=AI_SYSTEM_PROMPT.get(lang, AI_SYSTEM_PROMPT["uz"]),
+            messages=[{"role": "user", "content": question}],
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        logger.error(f"AI xatosi: {e}")
+        return None
+
+
+# Dolzarb/muhim mavzularni aniqlash uchun kalit so'zlar (uz/ru/en)
+URGENT_KEYWORDS = [
+    # shikoyat, firibgar, muammo
+    "shikoyat", "firibgar", "aldash", "fraud", "scam", "жалоба", "мошенник", "обман",
+    "complaint", "fraudulent",
+    # to'lov muammosi
+    "to'lov kelmadi", "pul kelmadi", "to'lov bo'lmadi", "выплата не пришла", "деньги не пришли",
+    "payment not received", "didn't receive payment", "haven't received",
+    # texnik muammo / hisob bloklandi
+    "hisobim bloklandi", "blocklandi", "bloklandi", "ishlamayapti", "kirolmayapman",
+    "аккаунт заблокирован", "не могу войти", "не работает", "заблокирован",
+    "account blocked", "can't login", "not working", "technical issue", "texnik muammo",
+    # yuqori CPA / maxsus shartnoma / VIP / contest byudjeti
+    "yuqori cpa", "maxsus shart", "vip", "individual shartnoma", "katta trafik",
+    "повышенный cpa", "особые условия", "индивидуальные условия", "крупный трафик",
+    "higher cpa", "special terms", "custom deal", "large traffic", "exclusive deal",
+    "byudjet so'rov", "contest byudjet", "конкурсный бюджет", "contest budget",
+    # umumiy yordam so'rovi / tezkor
+    "tezroq yordam", "urgent", "срочно", "asap",
+]
+
+
+def is_urgent(text: str) -> bool:
+    """Xabar matnida dolzarb/muhim mavzu belgilari bor-yo'qligini tekshiradi."""
+    lowered = text.lower()
+    return any(kw in lowered for kw in URGENT_KEYWORDS)
+
 
 # ============ MATNLAR ============
 TEXTS = {
@@ -263,7 +344,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             data["telegram"] = text
             await forward_to_admin(
-                context, chat_id, lang, "YANGI RO'YXATDAN O'TISH / NEW REGISTRATION",
+                context, chat_id, lang, "🆕 YANGI HAMKOR / NEW PARTNER",
                 f"Email: {data['email']}\nTelegram: {data['telegram']}",
             )
             await update.message.reply_text(t["reg_thanks"])
@@ -276,8 +357,25 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "payment": "TO'LOV SAVOLI / PAYMENT QUESTION",
             "other": "BOSHQA SAVOL / OTHER QUESTION",
         }[mode]
-        await forward_to_admin(context, chat_id, lang, category, text)
-        await update.message.reply_text(t["msg_sent"])
+
+        # Foydalanuvchiga "yozyapman" statusi ko'rsatiladi
+        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+        ai_answer = get_ai_advice(text, lang)
+        urgent = is_urgent(text)
+
+        if ai_answer:
+            await update.message.reply_text(ai_answer, reply_markup=main_menu_kb(lang))
+            if urgent:
+                await forward_to_admin(
+                    context, chat_id, lang, f"🚨 DOLZARB / URGENT — {category}",
+                    f"Savol: {text}\n\nAI javobi: {ai_answer}",
+                )
+        else:
+            # AI ishlamasa, ehtiyot chorasi sifatida har doim adminga yuboriladi
+            await forward_to_admin(context, chat_id, lang, f"⚠️ AI JAVOB BERMADI — {category}", text)
+            await update.message.reply_text(t["msg_sent"], reply_markup=main_menu_kb(lang))
+
         user_mode[chat_id] = None
         return
 
