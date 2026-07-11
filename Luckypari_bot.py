@@ -295,6 +295,10 @@ SYSTEM_PROMPT = {
         "kreativlarni (banner/matn) A/B testlash, referral bonus yoki konkurs tashkil qilish, "
         "trafik manbasini diversifikatsiya qilish kabi. "
         "Javobing qisqa (3-6 jumla), do'stona va professional bo'lsin. "
+        "FORMATLASH: Telegram oddiy matnni ko'rsatadi, Markdown belgilarini emas — shuning uchun "
+        "#, ##, ---, ** kabi belgilarni HECH QACHON ishlatma. Sarlavha kerak bo'lsa mos emoji bilan "
+        "boshlang'ich jumla qil (masalan '🎯 FTD oshirish uchun:'). Ro'yxat kerak bo'lsa oddiy emoji "
+        "yoki raqam bilan boshla (masalan '1)' yoki '✅'), tire (-) yoki yulduzcha ishlatma. "
         "Har bir javob oxirida foydalanuvchini yana savol berishga tabiiy tarzda taklif qil, "
         "lekin har safar boshqacha so'zlar bilan — bir xil jumlani takrorlama. "
         "Hech qachon aniq daromad, to'lov miqdori yoki foizni o'zingdan o'ylab topib aytma — faqat senga "
@@ -313,6 +317,10 @@ SYSTEM_PROMPT = {
         "протестировать креативы (баннеры/тексты) A/B-методом, запустить реферальный бонус или конкурс, "
         "диверсифицировать источники трафика. "
         "Ответ короткий (3-6 предложений), дружелюбный и профессиональный. "
+        "ФОРМАТИРОВАНИЕ: Telegram показывает обычный текст, а не Markdown — поэтому НИКОГДА не используй "
+        "символы #, ##, ---, **. Если нужен заголовок, начни предложение с подходящего эмодзи "
+        "(например '🎯 Как повысить FTD:'). Для списка используй эмодзи или цифру с скобкой "
+        "(например '1)' или '✅'), не используй тире (-) или звёздочки. "
         "В конце каждого ответа естественно предложи задать ещё вопрос, но каждый раз другими словами — "
         "не повторяй одну и ту же фразу. "
         "Никогда не придумывай конкретный доход, суммы выплат или проценты сам — опирайся только на "
@@ -330,6 +338,10 @@ SYSTEM_PROMPT = {
         "steps: check landing page quality, refine audience targeting, A/B test creatives (banners/copy), "
         "launch a referral bonus or contest, diversify traffic sources. "
         "Keep answers short (3-6 sentences), friendly and professional. "
+        "FORMATTING: Telegram displays plain text, not Markdown — so NEVER use symbols like #, ##, ---, **. "
+        "If a heading is needed, start a sentence with a fitting emoji instead (e.g. '🎯 To boost FTDs:'). "
+        "For lists, use an emoji or a number with a parenthesis (e.g. '1)' or '✅'), never use dashes (-) "
+        "or asterisks. "
         "End each answer with a natural invitation to ask more, but phrase it differently each time — "
         "never repeat the same closing line. "
         "Never invent specific income, payment amounts, or percentages yourself — rely only on facts "
@@ -681,7 +693,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     category = category_map.get(mode, "ERKIN SAVOL / FREE QUESTION")
 
     if ai_answer:
-        await update.message.reply_text(ai_answer, reply_markup=main_menu_kb(lang))
+        await update.message.reply_text(ai_answer, reply_markup=model_detail_kb(lang))
         if urgent:
             await forward_to_admin(
                 context, chat_id, lang, f"🚨 DOLZARB / URGENT — {category}",
@@ -689,7 +701,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
     else:
         await forward_to_admin(context, chat_id, lang, f"⚠️ AI JAVOB BERMADI — {category}", text)
-        await update.message.reply_text(t["ai_unavailable"], reply_markup=main_menu_kb(lang))
+        await update.message.reply_text(t["ai_unavailable"], reply_markup=model_detail_kb(lang))
 
     if mode is not None:
         user_mode[chat_id] = None
