@@ -185,6 +185,7 @@ TEXTS = {
         "ask_email": "Davom etish uchun emailingizni yuboring:",
         "ask_geo": "Qaysi davlatlar (GEO) bo'yicha trafik yuritasiz?",
         "ask_promo": "Qanday promo-materiallardan foydalanasiz (banner, promokod va h.k.)? Hali yo'q bo'lsa \"yo'q\" deb yozing.",
+        "model_more_questions": "\n\n💬 Savollaringiz bo'lsa, shu yerga yozing — batafsil tushuntirib beraman.",
         "partner_prompt": "Qaysi yo'nalishda yordam kerak? (masalan: FTD oshirish, trafik manbai, konversiya) — yozing, men maslahat beraman.",
         "payment_prompt": "To'lov bilan bog'liq savolingizni yozing. Zarur bo'lsa, Tommy'ga yuboraman.",
         "other_prompt": "Savolingizni yozing, javob beraman yoki Tommy'ga yetkazaman.",
@@ -225,6 +226,7 @@ TEXTS = {
         "ask_email": "Для продолжения пришлите ваш email:",
         "ask_geo": "По каким странам (GEO) вы направляете трафик?",
         "ask_promo": "Какие промо-материалы вы используете (баннеры, промокоды и т.д.)? Если пока нет, напишите \"нет\".",
+        "model_more_questions": "\n\n💬 Если есть вопросы, напишите их здесь — отвечу подробнее.",
         "partner_prompt": "В каком направлении нужна помощь? (например: рост FTD, источники трафика, конверсия) — напишите, я подскажу.",
         "payment_prompt": "Напишите вопрос по выплатам. При необходимости передам Tommy.",
         "other_prompt": "Напишите вопрос, я отвечу или передам Tommy.",
@@ -265,6 +267,7 @@ TEXTS = {
         "ask_email": "To continue, send your email:",
         "ask_geo": "Which countries (GEO) do you drive traffic to?",
         "ask_promo": "What promo materials do you use (banners, promo codes, etc)? If none yet, write \"no\".",
+        "model_more_questions": "\n\n💬 If you have questions, write them here — I'll explain in more detail.",
         "partner_prompt": "What area do you need help with? (e.g. increasing FTDs, traffic sources, conversion) — write in, I'll advise.",
         "payment_prompt": "Write your payment-related question. I'll forward it to Tommy if needed.",
         "other_prompt": "Write your question, I'll answer or pass it to Tommy.",
@@ -338,6 +341,10 @@ def reg_model_kb(lang):
     return InlineKeyboardMarkup(buttons)
 
 
+def model_detail_kb(lang):
+    return InlineKeyboardMarkup([[InlineKeyboardButton(TEXTS[lang]["btn_back"], callback_data="back")]])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Tilni tanlang / Выберите язык / Choose language:", reply_markup=lang_kb())
 
@@ -365,24 +372,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lang = data.split("_")[1]
         user_lang[chat_id] = lang
         user_mode[chat_id] = None
-        await query.edit_message_text(TEXTS[lang]["welcome"], reply_markup=main_menu_kb(lang))
+        await context.bot.send_message(chat_id=chat_id, text=TEXTS[lang]["welcome"], reply_markup=main_menu_kb(lang))
         return
 
     lang = user_lang.get(chat_id, "uz")
     t = TEXTS[lang]
 
     if data == "models":
-        await query.edit_message_text(t["models_intro"], reply_markup=models_kb(lang))
+        await context.bot.send_message(chat_id=chat_id, text=t["models_intro"], reply_markup=models_kb(lang))
 
     elif data.startswith("model_"):
         idx = int(data.split("_")[1])
         name, desc = MODELS[lang][idx]
-        await query.edit_message_text(f"💰 {name}\n\n{desc}", reply_markup=models_kb(lang))
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"💰 {name}\n\n{desc}{t['model_more_questions']}",
+            reply_markup=model_detail_kb(lang),
+        )
 
     elif data == "register":
         user_mode[chat_id] = "register"
         reg_data[chat_id] = {"step": "channel"}
-        await query.edit_message_text(t["reg_step1"])
+        await context.bot.send_message(chat_id=chat_id, text=t["reg_step1"])
 
     elif data.startswith("regmodel_"):
         idx = int(data.split("_")[1])
@@ -390,23 +401,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reg_data.setdefault(chat_id, {})["model"] = model_name
         offer = t["offer_rs"] if idx == 1 else t["offer_other"]
         reg_data[chat_id]["step"] = "email"
-        await query.edit_message_text(offer + "\n\n" + t["ask_email"])
+        await context.bot.send_message(chat_id=chat_id, text=offer + "\n\n" + t["ask_email"])
 
     elif data == "partner":
         user_mode[chat_id] = "partner"
-        await query.edit_message_text(t["partner_prompt"])
+        await context.bot.send_message(chat_id=chat_id, text=t["partner_prompt"])
 
     elif data == "payment":
         user_mode[chat_id] = "payment"
-        await query.edit_message_text(t["payment_prompt"] + t["no_guarantee"])
+        await context.bot.send_message(chat_id=chat_id, text=t["payment_prompt"] + t["no_guarantee"])
 
     elif data == "other":
         user_mode[chat_id] = "other"
-        await query.edit_message_text(t["other_prompt"])
+        await context.bot.send_message(chat_id=chat_id, text=t["other_prompt"])
 
     elif data == "back":
         user_mode[chat_id] = None
-        await query.edit_message_text(t["welcome"], reply_markup=main_menu_kb(lang))
+        await context.bot.send_message(chat_id=chat_id, text=t["welcome"], reply_markup=main_menu_kb(lang))
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
