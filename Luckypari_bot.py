@@ -455,11 +455,329 @@ TEXTS = {
         "register": "📝 Yangi hamkor bo'lish",
         "partner": "📈 Mavjud hamkorlar yordami",
         "payment": "💳 To'lov bo'yicha savol",
-        "
-          "send_text_or_media": (
+        "other": "✉️ Boshqa savol",
+        "back": "⬅️ Asosiy menyu",
+
+        "models_text": (
+            "💰 <b>HAMKORLIK MODELLARI</b>\n\n"
+
+            "🔹 <b>CPA</b>\n"
+            "Har bir tasdiqlangan FTD uchun kelishilgan qat'iy to'lov.\n\n"
+
+            "🔹 <b>RevShare (RS)</b>\n"
+            "Jalb qilingan o'yinchilardan tushgan daromadning "
+            "kelishilgan foizi.\n\n"
+
+            "🔹 <b>Hybrid</b>\n"
+            "CPA va RevShare birgalikda ishlaydigan model.\n\n"
+
+            "🔹 <b>Postpay</b>\n"
+            "To'lov kelishilgan KPI bajarilgandan keyin beriladi.\n\n"
+
+            "🔹 <b>Fix</b>\n"
+            "Reklama joylashtirish uchun kelishilgan qat'iy summa.\n\n"
+
+            "📌 Aniq shartlar trafik manbasi va statistika "
+            "asosida Tommy bilan individual kelishiladi."
+        ),
+
+        "ask_partner": (
+            "📈 <b>MAVJUD HAMKORLAR YORDAMI</b>\n\n"
+            "Savol yoki muammoingizni batafsil yozing.\n\n"
+
+            "Masalan:\n"
+            "• FTD yoki konversiya masalasi\n"
+            "• Promo-material kerak\n"
+            "• Shaxsiy hamkorlik sharti\n"
+            "• Affiliate hisob muammosi\n"
+            "• Texnik yordam\n\n"
+
+            "📩 Xabaringiz Tommy'ga yuboriladi."
+        ),
+
+        "ask_payment": (
+            "💳 <b>TO'LOV BO'YICHA MUROJAAT</b>\n\n"
+            "Muammoni batafsil yozing.\n\n"
+
+            "Imkon bo'lsa quyidagilarni kiriting:\n\n"
+            "🆔 Affiliate ID\n"
+            "💵 To'lov summasi\n"
+            "📅 To'lov sanasi\n"
+            "💳 To'lov usuli\n"
+            "📝 Muammo tavsifi\n\n"
+
+            "📩 Xabaringiz Tommy'ga yuboriladi."
+        ),
+
+        "ask_other": (
+            "✉️ <b>BOSHQA SAVOL</b>\n\n"
+            "Savolingizni yoki murojaatingizni batafsil yozing.\n\n"
+            "📩 Xabaringiz Tommy'ga yuboriladi va javob shu chatga keladi."
+        ),
+
+        "sent": (
+            "✅ <b>Xabaringiz Tommy'ga yuborildi.</b>\n\n"
+            "Tommy javob berganda javob avtomatik ravishda "
+            "shu chatga keladi."
+        ),
+
+        "reply": (
+            "📩 <b>Tommy'dan javob:</b>\n\n"
+        ),
+
+        "reg_source": (
+            "📝 <b>YANGI HAMKOR BO'LISH</b>\n\n"
+            "Avval rasmiy saytda ro'yxatdan o'ting:\n"
+            f"🔗 {REGISTRATION_URL}\n\n"
+
+            "Endi trafik manbangizni yuboring.\n\n"
+
+            "Masalan:\n"
+            "• Telegram kanal havolasi\n"
+            "• Instagram sahifasi\n"
+            "• YouTube kanali\n"
+            "• TikTok sahifasi\n"
+            "• Sayt yoki boshqa trafik manbasi\n\n"
+
+            "Agar hali trafik manbangiz bo'lmasa, "
+            "“yo'q” deb yozishingiz mumkin.\n\n"
+
+            "❌ Bekor qilish: /cancel"
+        ),
+
+        "reg_model": (
+            "💰 <b>Hamkorlik modelini tanlang:</b>"
+        ),
+
+        "reg_email": (
+            "📧 <b>Email manzilingizni yuboring:</b>\n\n"
+            "Masalan: name@gmail.com"
+        ),
+
+        "reg_username": (
+            "🔗 <b>Telegram username'ingizni yuboring:</b>\n\n"
+            "Masalan: @username"
+        ),
+
+        "reg_geo": (
+            "🌍 <b>Qaysi davlatlar yoki GEO bo'yicha "
+            "trafik olib kelasiz?</b>\n\n"
+
+            "Masalan: Uzbekistan, CIS, Turkey yoki boshqa GEO."
+        ),
+
+        "reg_promo": (
+            "📢 <b>Qanday reklama usullaridan foydalanasiz?</b>\n\n"
+
+            "Masalan:\n"
+            "• Telegram postlar\n"
+            "• Instagram Stories/Reels\n"
+            "• YouTube\n"
+            "• TikTok\n"
+            "• Facebook yoki Google Ads\n"
+            "• SEO\n\n"
+
+            "Hali aniq bo'lmasa, “yo'q” deb yozing."
+        ),
+
+        "invalid_email": (
+            "⚠️ <b>Email noto'g'ri yozilgan.</b>\n\n"
+            "To'g'ri formatda qayta yuboring.\n"
+            "Masalan: name@gmail.com"
+        ),
+
+        "invalid_username": (
+            "⚠️ <b>Telegram username noto'g'ri.</b>\n\n"
+            "Username @ belgisi bilan boshlanishi kerak.\n"
+            "Masalan: @username"
+        ),
+
+        "registered": (
+            "✅ <b>Ma'lumotlaringiz Tommy'ga yuborildi!</b>\n\n"
+            "Tommy ma'lumotlaringizni ko'rib chiqib, "
+            "Telegram orqali siz bilan bog'lanadi."
+        ),
+
+        "cancelled": (
+            "❌ Ro'yxatdan o'tish bekor qilindi."
+        ),
+
+        "send_text_or_media": (
+            "⚠️ Iltimos, savolingizni matn, rasm, video, "
+            "ovozli xabar yoki fayl shaklida yuboring."
+        ),
+    },
+
+    "ru": {
+        "choose_language": (
+            "🌐 <b>Выберите язык:</b>"
+        ),
+
+        "welcome": (
+            "👋 <b>Добро пожаловать в бот поддержки Tommy Partners!</b>\n\n"
+            "Здесь вы можете получить информацию о сотрудничестве, "
+            "зарегистрироваться как новый партнёр или отправить "
+            "вопрос напрямую Tommy.\n\n"
+            "👇 Выберите нужный раздел:"
+        ),
+
+        "models": "💰 Модели сотрудничества",
+        "register": "📝 Стать новым партнёром",
+        "partner": "📈 Помощь действующим партнёрам",
+        "payment": "💳 Вопрос по выплате",
+        "other": "✉️ Другой вопрос",
+        "back": "⬅️ Главное меню",
+
+        "models_text": (
+            "💰 <b>МОДЕЛИ СОТРУДНИЧЕСТВА</b>\n\n"
+
+            "🔹 <b>CPA</b>\n"
+            "Фиксированная выплата за каждый подтверждённый FTD.\n\n"
+
+            "🔹 <b>RevShare (RS)</b>\n"
+            "Согласованный процент от дохода привлечённых игроков.\n\n"
+
+            "🔹 <b>Hybrid</b>\n"
+            "Совместное использование CPA и RevShare.\n\n"
+
+            "🔹 <b>Postpay</b>\n"
+            "Оплата после выполнения согласованных KPI.\n\n"
+
+            "🔹 <b>Fix</b>\n"
+            "Фиксированная сумма за рекламное размещение.\n\n"
+
+            "📌 Точные условия обсуждаются с Tommy индивидуально "
+            "на основе источника и статистики трафика."
+        ),
+
+        "ask_partner": (
+            "📈 <b>ПОМОЩЬ ДЕЙСТВУЮЩИМ ПАРТНЁРАМ</b>\n\n"
+            "Подробно опишите ваш вопрос или проблему.\n\n"
+
+            "Например:\n"
+            "• FTD или конверсия\n"
+            "• Нужны промоматериалы\n"
+            "• Индивидуальные условия\n"
+            "• Проблема с affiliate-аккаунтом\n"
+            "• Техническая помощь\n\n"
+
+            "📩 Сообщение будет отправлено Tommy."
+        ),
+
+        "ask_payment": (
+            "💳 <b>ВОПРОС ПО ВЫПЛАТЕ</b>\n\n"
+            "Подробно опишите проблему.\n\n"
+
+            "По возможности укажите:\n\n"
+            "🆔 Affiliate ID\n"
+            "💵 Сумму выплаты\n"
+            "📅 Дату выплаты\n"
+            "💳 Способ оплаты\n"
+            "📝 Описание проблемы\n\n"
+
+            "📩 Сообщение будет отправлено Tommy."
+        ),
+
+        "ask_other": (
+            "✉️ <b>ДРУГОЙ ВОПРОС</b>\n\n"
+            "Подробно напишите ваш вопрос или обращение.\n\n"
+            "📩 Сообщение будет отправлено Tommy, "
+            "а ответ придёт в этот чат."
+        ),
+
+        "sent": (
+            "✅ <b>Ваше сообщение отправлено Tommy.</b>\n\n"
+            "Когда Tommy ответит, сообщение автоматически "
+            "появится в этом чате."
+        ),
+
+        "reply": (
+            "📩 <b>Ответ от Tommy:</b>\n\n"
+        ),
+
+        "reg_source": (
+            "📝 <b>РЕГИСТРАЦИЯ НОВОГО ПАРТНЁРА</b>\n\n"
+            "Сначала зарегистрируйтесь на официальном сайте:\n"
+            f"🔗 {REGISTRATION_URL}\n\n"
+
+            "Теперь отправьте источник трафика.\n\n"
+
+            "Например:\n"
+            "• Ссылка на Telegram-канал\n"
+            "• Instagram\n"
+            "• YouTube\n"
+            "• TikTok\n"
+            "• Сайт или другой источник\n\n"
+
+            "Если источника пока нет, напишите «нет».\n\n"
+
+            "❌ Отмена: /cancel"
+        ),
+
+        "reg_model": (
+            "💰 <b>Выберите модель сотрудничества:</b>"
+        ),
+
+        "reg_email": (
+            "📧 <b>Отправьте ваш email:</b>\n\n"
+            "Например: name@gmail.com"
+        ),
+
+        "reg_username": (
+            "🔗 <b>Отправьте ваш Telegram username:</b>\n\n"
+            "Например: @username"
+        ),
+
+        "reg_geo": (
+            "🌍 <b>По каким странам или GEO "
+            "вы направляете трафик?</b>\n\n"
+
+            "Например: Uzbekistan, CIS, Turkey или другое GEO."
+        ),
+
+        "reg_promo": (
+            "📢 <b>Какие рекламные источники вы используете?</b>\n\n"
+
+            "Например:\n"
+            "• Telegram\n"
+            "• Instagram Stories/Reels\n"
+            "• YouTube\n"
+            "• TikTok\n"
+            "• Facebook или Google Ads\n"
+            "• SEO\n\n"
+
+            "Если пока не определились, напишите «нет»."
+        ),
+
+        "invalid_email": (
+            "⚠️ <b>Email указан неверно.</b>\n\n"
+            "Отправьте адрес в правильном формате.\n"
+            "Например: name@gmail.com"
+        ),
+
+        "invalid_username": (
+            "⚠️ <b>Неверный Telegram username.</b>\n\n"
+            "Username должен начинаться с символа @.\n"
+            "Например: @username"
+        ),
+
+        "registered": (
+            "✅ <b>Ваши данные отправлены Tommy!</b>\n\n"
+            "Tommy рассмотрит информацию и свяжется "
+            "с вами через Telegram."
+        ),
+
+        "cancelled": (
+            "❌ Регистрация отменена."
+        ),
+
+        "send_text_or_media": (
             "⚠️ Отправьте вопрос в виде текста, изображения, "
             "видео, голосового сообщения или файла."
         ),
+    },
+}
+        
     },
 
     "en": {
