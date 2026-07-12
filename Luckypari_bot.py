@@ -776,7 +776,6 @@ TEXTS = {
             "видео, голосового сообщения или файла."
         ),
     },
-}
     "en": {
         "choose_language": "🌐 <b>Choose your language:</b>",
 
