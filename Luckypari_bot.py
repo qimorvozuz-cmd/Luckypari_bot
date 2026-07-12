@@ -1,762 +1,2039 @@
 """
-LuckyPari Affiliate Support Bot — yagona fayl versiyasi.
-
-- Claude (Anthropic) AI botning asosiy "miyasi": barcha savollarga (shu jumladan
-  hamkorlik modellari haqida ham) mustaqil, kontekstni hisobga olgan holda javob beradi.
-- Ro'yxatdan o'tish ConversationHandler orqali boshqariladi.
-- Dolzarb mavzular (to'lov, VIP, higher CPA, bloklangan hisob va h.k.) avtomatik
-  Tommy'ga (adminga) forward qilinadi.
-- Uz / Ru / En tillarni qo'llab-quvvatlaydi.
-
-MUHIT O'ZGARUVCHILARI (Railway → Variables, yoki lokal .env fayl):
-    BOT_TOKEN          — @BotFather'dan olingan token
-    ADMIN_CHAT_ID       — Tommy (admin)ning Telegram chat ID'i
-    ANTHROPIC_API_KEY   — console.anthropic.com'dan olingan API kalit
-    REGISTRATION_URL    — (ixtiyoriy) rasmiy ro'yxatdan o'tish sayti
+Tommy Partners Bot — sodda va ishonchli admin panel.
 
 O'RNATISH:
-    pip install python-telegram-bot anthropic python-dotenv
+    pip install -U python-telegram-bot python-dotenv
+
+RAILWAY VARIABLES:
+    BOT_TOKEN=...
+    ADMIN_CHAT_ID=...
+    REGISTRATION_URL=https://Luckyparipartners.com
 
 ISHGA TUSHIRISH:
     python bot.py
 """
 
+import html
 import logging
 import os
 import re
-from collections import defaultdict
+import sqlite3
+from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
-    CommandHandler,
     CallbackQueryHandler,
-    MessageHandler,
-    ConversationHandler,
+    CommandHandler,
     ContextTypes,
+    ConversationHandler,
+    MessageHandler,
     filters,
 )
-from anthropic import Anthropic, APIError, APITimeoutError
 
 # ============================================================
-# 1) KONFIGURATSIYA
+# 1. SOZLAMALAR
 # ============================================================
 
-load_dotenv()  # .env fayli mavjud bo'lsa, undan o'qiydi (lokal muhitda)
+load_dotenv()
 
 
-def _require(name: str) -> str:
-    value = os.environ.get(name)
+def required_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+
     if not value:
         raise RuntimeError(
-            f"Muhit o'zgaruvchisi topilmadi: {name}. "
-            f"Uni Railway'ning 'Variables' bo'limiga yoki lokal .env fayliga qo'shing."
+            f"{name} topilmadi. Railway Variables bo'limiga kiriting."
         )
+
     return value
 
 
-BOT_TOKEN = _require("BOT_TOKEN")
-ADMIN_CHAT_ID = int(_require("ADMIN_CHAT_ID"))
-ANTHROPIC_API_KEY = _require("ANTHROPIC_API_KEY")
-REGISTRATION_URL = os.environ.get("REGISTRATION_URL", "http://Luckyparipartners.com")
+BOT_TOKEN = required_env("BOT_TOKEN")
+ADMIN_CHAT_ID = int(required_env("ADMIN_CHAT_ID"))
 
-AI_MODEL = "claude-sonnet-4-6"
-AI_MAX_TOKENS = 280
-AI_REQUEST_TIMEOUT = 20.0
-AI_HISTORY_LIMIT = 10
+REGISTRATION_URL = os.getenv(
+    "REGISTRATION_URL",
+    "https://Luckyparipartners.com",
+).strip()
+
+DB_PATH = Path(
+    os.getenv(
+        "DB_PATH",
+        "tommy_bot.db",
+    )
+)
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger(__name__)
+
+logger = logging.getLogger("tommy_bot")
+
+EMAIL_RE = re.compile(
+    r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$"
+)
+
+USERNAME_RE = re.compile(
+    r"^@[A-Za-z0-9_]{3,32}$"
+)
+
+# Ro'yxatdan o'tish bosqichlari
+REG_SOURCE, REG_MODEL, REG_EMAIL, REG_USERNAME, REG_GEO, REG_PROMO = range(6)
 
 
 # ============================================================
-# 2) VALIDATORLAR VA DOLZARB MAVZU ANIQLASH
+# 2. MA'LUMOTLAR BAZASI
 # ============================================================
 
-EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
-
-URGENT_KEYWORDS = [
-    "shikoyat", "firibgar", "aldash", "fraud", "scam", "жалоба", "мошенник", "обман",
-    "complaint", "fraudulent",
-    "to'lov kelmadi", "pul kelmadi", "to'lov bo'lmadi", "выплата не пришла", "деньги не пришли",
-    "payment not received", "didn't receive payment", "haven't received",
-    "hisobim bloklandi", "blocklandi", "bloklandi", "ishlamayapti", "kirolmayapman",
-    "аккаунт заблокирован", "не могу войти", "не работает", "заблокирован",
-    "account blocked", "can't login", "not working", "technical issue", "texnik muammo",
-    "yuqori cpa", "maxsus shart", "vip", "individual shartnoma", "katta trafik",
-    "повышенный cpa", "особые условия", "индивидуальные условия", "крупный трафик",
-    "higher cpa", "special terms", "custom deal", "large traffic", "exclusive deal",
-    "byudjet so'rov", "contest byudjet", "конкурсный бюджет", "contest budget",
-    "tezroq yordam", "urgent", "срочно", "asap",
-]
+def db_connect() -> sqlite3.Connection:
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
 
 
-def is_valid_email(text: str) -> bool:
-    return bool(EMAIL_REGEX.match(text.strip()))
+def init_db() -> None:
+    with db_connect() as connection:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                first_name TEXT,
+                last_name TEXT,
+                username TEXT,
+                language TEXT DEFAULT 'uz',
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS questions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                message_type TEXT NOT NULL,
+                message_text TEXT,
+                file_id TEXT,
+                admin_message_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                answered_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS partners (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                source TEXT,
+                model TEXT,
+                email TEXT,
+                telegram_username TEXT,
+                geo TEXT,
+                promo TEXT,
+                admin_message_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'new',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS admin_links (
+                admin_message_id INTEGER PRIMARY KEY,
+                target_user_id INTEGER NOT NULL,
+                item_type TEXT NOT NULL,
+                item_id INTEGER,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
 
 
-def is_valid_username(text: str) -> bool:
-    text = text.strip()
-    return text.startswith("@") and len(text) > 1 and " " not in text
+def now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
 
 
-def is_urgent(text: str) -> bool:
-    lowered = text.lower()
-    return any(kw in lowered for kw in URGENT_KEYWORDS)
+def save_user(
+    update: Update,
+    language: str | None = None,
+) -> None:
+    user = update.effective_user
+
+    if not user:
+        return
+
+    timestamp = now_iso()
+
+    with db_connect() as connection:
+        row = connection.execute(
+            "SELECT language FROM users WHERE user_id = ?",
+            (user.id,),
+        ).fetchone()
+
+        saved_language = language or (
+            row["language"] if row else "uz"
+        )
+
+        connection.execute(
+            """
+            INSERT INTO users (
+                user_id,
+                first_name,
+                last_name,
+                username,
+                language,
+                created_at,
+                last_seen_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+
+            ON CONFLICT(user_id) DO UPDATE SET
+                first_name = excluded.first_name,
+                last_name = excluded.last_name,
+                username = excluded.username,
+                language = excluded.language,
+                last_seen_at = excluded.last_seen_at
+            """,
+            (
+                user.id,
+                user.first_name or "",
+                user.last_name or "",
+                user.username or "",
+                saved_language,
+                timestamp,
+                timestamp,
+            ),
+        )
+
+
+def get_user_language(user_id: int) -> str:
+    with db_connect() as connection:
+        row = connection.execute(
+            "SELECT language FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+
+    if row:
+        return row["language"]
+
+    return "uz"
+
+
+def add_admin_link(
+    admin_message_id: int,
+    target_user_id: int,
+    item_type: str,
+    item_id: int | None,
+) -> None:
+    with db_connect() as connection:
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO admin_links (
+                admin_message_id,
+                target_user_id,
+                item_type,
+                item_id,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                admin_message_id,
+                target_user_id,
+                item_type,
+                item_id,
+                now_iso(),
+            ),
+        )
+
+
+def get_admin_link(
+    admin_message_id: int,
+) -> sqlite3.Row | None:
+    with db_connect() as connection:
+        return connection.execute(
+            """
+            SELECT *
+            FROM admin_links
+            WHERE admin_message_id = ?
+            """,
+            (admin_message_id,),
+        ).fetchone()
+
+
+def add_question(
+    user_id: int,
+    category: str,
+    message_type: str,
+    message_text: str | None,
+    file_id: str | None,
+) -> int:
+    with db_connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO questions (
+                user_id,
+                category,
+                message_type,
+                message_text,
+                file_id,
+                status,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'pending', ?)
+            """,
+            (
+                user_id,
+                category,
+                message_type,
+                message_text,
+                file_id,
+                now_iso(),
+            ),
+        )
+
+        return int(cursor.lastrowid)
+
+
+def set_question_admin_message(
+    question_id: int,
+    admin_message_id: int,
+) -> None:
+    with db_connect() as connection:
+        connection.execute(
+            """
+            UPDATE questions
+            SET admin_message_id = ?
+            WHERE id = ?
+            """,
+            (
+                admin_message_id,
+                question_id,
+            ),
+        )
+
+
+def mark_question_answered(
+    question_id: int,
+) -> None:
+    with db_connect() as connection:
+        connection.execute(
+            """
+            UPDATE questions
+            SET status = 'answered',
+                answered_at = ?
+            WHERE id = ?
+            """,
+            (
+                now_iso(),
+                question_id,
+            ),
+        )
+
+
+def add_partner(
+    user_id: int,
+    source: str,
+    model: str,
+    email: str,
+    telegram_username: str,
+    geo: str,
+    promo: str,
+) -> int:
+    with db_connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO partners (
+                user_id,
+                source,
+                model,
+                email,
+                telegram_username,
+                geo,
+                promo,
+                status,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'new', ?)
+            """,
+            (
+                user_id,
+                source,
+                model,
+                email,
+                telegram_username,
+                geo,
+                promo,
+                now_iso(),
+            ),
+        )
+
+        return int(cursor.lastrowid)
+
+
+def set_partner_admin_message(
+    partner_id: int,
+    admin_message_id: int,
+) -> None:
+    with db_connect() as connection:
+        connection.execute(
+            """
+            UPDATE partners
+            SET admin_message_id = ?
+            WHERE id = ?
+            """,
+            (
+                admin_message_id,
+                partner_id,
+            ),
+        )
+
+
+def get_statistics() -> dict[str, int]:
+    with db_connect() as connection:
+        users_count = connection.execute(
+            "SELECT COUNT(*) AS total FROM users"
+        ).fetchone()["total"]
+
+        partners_count = connection.execute(
+            "SELECT COUNT(*) AS total FROM partners"
+        ).fetchone()["total"]
+
+        new_partners_count = connection.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM partners
+            WHERE status = 'new'
+            """
+        ).fetchone()["total"]
+
+        pending_questions = connection.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM questions
+            WHERE status = 'pending'
+            """
+        ).fetchone()["total"]
+
+        answered_questions = connection.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM questions
+            WHERE status = 'answered'
+            """
+        ).fetchone()["total"]
+
+    return {
+        "users": users_count,
+        "partners": partners_count,
+        "new_partners": new_partners_count,
+        "pending": pending_questions,
+        "answered": answered_questions,
+    }
 
 
 # ============================================================
-# 3) MATNLAR VA MODEL FAKTLARI (uz/ru/en)
+# 3. TILLAR VA MATNLAR
 # ============================================================
 
 TEXTS = {
     "uz": {
+        "choose_language": (
+            "🌐 <b>Tilni tanlang:</b>"
+        ),
+
         "welcome": (
-            "Assalomu alaykum! 👋\n"
-            "Men Tommy jamoasining AI-yordamchisiman — LuckyPari affiliate dasturi bo'yicha "
-            "istalgan savolingizga javob beraman va murakkab masalalarni Tommy'ga yetkazaman.\n\n"
-            "Nima bilan yordam bera olaman?"
+            "👋 <b>Tommy Partners yordam botiga xush kelibsiz!</b>\n\n"
+            "Bu bot orqali hamkorlik bo'yicha ma'lumot olishingiz, "
+            "yangi hamkor sifatida ro'yxatdan o'tishingiz yoki Tommy'ga "
+            "to'g'ridan-to'g'ri savol yuborishingiz mumkin.\n\n"
+            "👇 Kerakli bo'limni tanlang:"
         ),
-        "btn_models": "💰 Hamkorlik modellari",
-        "btn_register": "📝 Ro'yxatdan o'tish",
-        "btn_partner": "📈 Mavjud hamkorlar uchun yordam",
-        "btn_payment": "💳 To'lov bo'yicha savol",
-        "btn_other": "✉️ Boshqa savol",
-        "btn_back": "⬅️ Orqaga",
-        "models_intro": "Hamkorlik modelini tanlang:",
-        "model_more_questions": "\n\n💬 Savollaringiz bo'lsa, shu yerga yozing — batafsil tushuntirib beraman.",
-        "reg_step1": (
-            f"Ro'yxatdan o'tishni boshlaymiz! 🎯\n\nAvval rasmiy saytda ro'yxatdan o'ting:\n{REGISTRATION_URL}\n\n"
-            "Endi bir necha savolga javob bering.\n\n"
-            "Kazino/sport-betting mavzusida Telegram kanal yuritasizmi? Bo'lsa, kanal havolasini yuboring.\n"
-            "Agar boshqa bukmeker/kazino bilan hamkorlik qilib kelgan bo'lsangiz, statistikangizni "
-            "(screenshot yoki qisqacha tavsif) yuboring.\n"
-            "Ikkalasi ham sizga tegishli bo'lmasa, shunchaki \"yo'q\" deb yozing.\n\n"
-            "Istalgan vaqtda /cancel yozib bekor qilishingiz mumkin."
+
+        "models": "💰 Hamkorlik modellari",
+        "register": "📝 Yangi hamkor bo'lish",
+        "partner": "📈 Mavjud hamkorlar yordami",
+        "payment": "💳 To'lov bo'yicha savol",
+        "
+          "send_text_or_media": (
+            "⚠️ Отправьте вопрос в виде текста, изображения, "
+            "видео, голосового сообщения или файла."
         ),
-        "reg_thanks": "Rahmat! Ma'lumotlaringiz Tommy'ga yuborildi, u tez orada siz bilan bog'lanadi.",
-        "reg_cancelled": "Ro'yxatdan o'tish bekor qilindi.",
-        "reg_model_choose": "Rahmat! Endi qaysi hamkorlik modelida ishlashni xohlaysiz?",
-        "reg_recommend_rs": "\n\n💡 Tavsiya: ko'pchilik hamkorlarimiz uchun RevShare (RS) eng yuqori uzoq muddatli daromad beradi — birinchi tajriba sifatida shuni sinab ko'rishni tavsiya qilamiz.",
-        "reg_please_use_buttons": "Iltimos, yuqoridagi tugmalardan birini tanlang.",
-        "offer_rs": "🎯 RS bo'yicha sizga 45% gacha komissiya taklif qilamiz. Birinchi natijalaringizni ko'rgach, Fix va boshqa modellarni ham muhokama qilishimiz mumkin.",
-        "offer_other": "📊 Statistikangizni ko'rib chiqamiz. Ro'yxatdan to'liq o'tganingizdan so'ng Tommy shaxsan siz bilan bog'lanib, aniq shartlar va summani muhokama qiladi.",
-        "ask_email": "Davom etish uchun emailingizni yuboring:",
-        "ask_username": "Telegram username?",
-        "ask_geo": "Qaysi davlatlar (GEO) bo'yicha trafik yuritasiz?",
-        "ask_promo": "Qanday promo-materiallardan foydalanasiz (banner, promokod va h.k.)? Hali yo'q bo'lsa \"yo'q\" deb yozing.",
-        "invalid_email": "⚠️ Email formati noto'g'ri. Iltimos, to'g'ri email manzilingizni yozing (masalan: ism@gmail.com).",
-        "invalid_username": "⚠️ Telegram username @ belgisi bilan boshlanishi kerak (masalan: @username). Qayta yozing.",
-        "partner_prompt": "Qaysi yo'nalishda yordam kerak? (masalan: FTD oshirish, trafik manbai, konversiya) — yozing, men maslahat beraman.",
-        "payment_prompt": "To'lov bilan bog'liq savolingizni yozing. Zarur bo'lsa, Tommy'ga yuboraman.",
-        "other_prompt": "Savolingizni yozing, javob beraman yoki Tommy'ga yetkazaman.",
-        "reply_prefix": "📩 Tommy'dan javob:\n\n",
-        "no_guarantee": "\n\n⚠️ Eslatma: aniq daromad yoki to'lov miqdorini kafolatlay olmayman — bu shartlar individual tarzda Tommy bilan kelishiladi.",
-        "ai_unavailable": "⚠️ Hozir AI xizmatiga ulanib bo'lmadi. Xabaringiz Tommy'ga to'g'ridan-to'g'ri yuborildi, tez orada javob beradi.",
     },
-    "ru": {
-        "welcome": (
-            "Здравствуйте! 👋\n"
-            "Я AI-ассистент команды Tommy — отвечаю на любые вопросы о партнёрской программе LuckyPari "
-            "и передаю сложные вопросы Tommy напрямую.\n\n"
-            "Чем могу помочь?"
-        ),
-        "btn_models": "💰 Модели сотрудничества",
-        "btn_register": "📝 Регистрация",
-        "btn_partner": "📈 Помощь действующим партнёрам",
-        "btn_payment": "💳 Вопрос по выплатам",
-        "btn_other": "✉️ Другой вопрос",
-        "btn_back": "⬅️ Назад",
-        "models_intro": "Выберите модель сотрудничества:",
-        "model_more_questions": "\n\n💬 Если есть вопросы, напишите их здесь — отвечу подробнее.",
-        "reg_step1": (
-            f"Начинаем регистрацию! 🎯\n\nСначала зарегистрируйтесь на официальном сайте:\n{REGISTRATION_URL}\n\n"
-            "Теперь ответьте на несколько вопросов.\n\n"
-            "Ведёте ли вы Telegram-канал на тему казино/спортивных ставок? Если да, пришлите ссылку на канал.\n"
-            "Если вы сотрудничали с другими букмекерами, пришлите вашу статистику (скриншот или краткое описание).\n"
-            "Если ни то, ни другое не подходит, просто напишите \"нет\".\n\n"
-            "В любой момент можно отменить регистрацию командой /cancel."
-        ),
-        "reg_thanks": "Спасибо! Данные отправлены Tommy, он свяжется с вами в ближайшее время.",
-        "reg_cancelled": "Регистрация отменена.",
-        "reg_model_choose": "Спасибо! Какую модель сотрудничества вы хотите выбрать?",
-        "reg_recommend_rs": "\n\n💡 Рекомендация: для большинства партнёров RevShare (RS) приносит наибольший долгосрочный доход — рекомендуем попробовать именно эту модель для начала.",
-        "reg_please_use_buttons": "Пожалуйста, выберите один из вариантов выше.",
-        "offer_rs": "🎯 По RS мы предлагаем вам комиссию до 45%. После первых результатов сможем обсудить также Fix и другие модели.",
-        "offer_other": "📊 Мы рассмотрим вашу статистику. После полной регистрации Tommy лично свяжется с вами и обсудит точные условия и сумму.",
-        "ask_email": "Для продолжения пришлите ваш email:",
-        "ask_username": "Telegram username?",
-        "ask_geo": "По каким странам (GEO) вы направляете трафик?",
-        "ask_promo": "Какие промо-материалы вы используете (баннеры, промокоды и т.д.)? Если пока нет, напишите \"нет\".",
-        "invalid_email": "⚠️ Неверный формат email. Пожалуйста, напишите корректный адрес (например: ivan@gmail.com).",
-        "invalid_username": "⚠️ Telegram username должен начинаться с @ (например: @username). Напишите заново.",
-        "partner_prompt": "В каком направлении нужна помощь? (например: рост FTD, источники трафика, конверсия) — напишите, я подскажу.",
-        "payment_prompt": "Напишите вопрос по выплатам. При необходимости передам Tommy.",
-        "other_prompt": "Напишите вопрос, я отвечу или передам Tommy.",
-        "reply_prefix": "📩 Ответ от Tommy:\n\n",
-        "no_guarantee": "\n\n⚠️ Обратите внимание: я не могу гарантировать доход или размер выплат — эти условия согласовываются индивидуально с Tommy.",
-        "ai_unavailable": "⚠️ Не удалось подключиться к AI. Ваше сообщение отправлено напрямую Tommy, он скоро ответит.",
-    },
+
     "en": {
+        "choose_language": "🌐 <b>Choose your language:</b>",
+
         "welcome": (
-            "Hello! 👋\n"
-            "I'm Tommy's AI assistant — I answer any question about the LuckyPari affiliate program "
-            "and forward more complex requests directly to Tommy.\n\n"
-            "How can I help you?"
+            "👋 <b>Welcome to Tommy Partners Support Bot!</b>\n\n"
+            "Here you can get cooperation information, register as a new "
+            "partner or send a question directly to Tommy.\n\n"
+            "👇 Choose a section:"
         ),
-        "btn_models": "💰 Cooperation models",
-        "btn_register": "📝 Register",
-        "btn_partner": "📈 Support for existing partners",
-        "btn_payment": "💳 Payment question",
-        "btn_other": "✉️ Other question",
-        "btn_back": "⬅️ Back",
-        "models_intro": "Choose a cooperation model:",
-        "model_more_questions": "\n\n💬 If you have questions, write them here — I'll explain in more detail.",
-        "reg_step1": (
-            f"Let's start registration! 🎯\n\nFirst, register on the official site:\n{REGISTRATION_URL}\n\n"
-            "Now please answer a few questions.\n\n"
-            "Do you run a Telegram channel on casino/sports betting? If so, send the channel link.\n"
-            "If you've worked with other bookmakers, send your stats (screenshot or brief description).\n"
-            "If neither applies to you, just write \"no\".\n\n"
-            "You can cancel anytime with /cancel."
+
+        "models": "💰 Cooperation models",
+        "register": "📝 Become a new partner",
+        "partner": "📈 Existing partner support",
+        "payment": "💳 Payment question",
+        "other": "✉️ Other question",
+        "back": "⬅️ Main menu",
+
+        "models_text": (
+            "💰 <b>COOPERATION MODELS</b>\n\n"
+            "🔹 <b>CPA</b>\n"
+            "A fixed payment for each confirmed FTD.\n\n"
+            "🔹 <b>RevShare (RS)</b>\n"
+            "An agreed percentage of revenue generated by referred players.\n\n"
+            "🔹 <b>Hybrid</b>\n"
+            "A combination of CPA and RevShare.\n\n"
+            "🔹 <b>Postpay</b>\n"
+            "Payment after the agreed KPI is completed.\n\n"
+            "🔹 <b>Fix</b>\n"
+            "A fixed amount for an advertising placement.\n\n"
+            "📌 Exact terms are discussed individually with Tommy."
         ),
-        "reg_thanks": "Thanks! Your details were sent to Tommy, he'll reach out soon.",
-        "reg_cancelled": "Registration cancelled.",
-        "reg_model_choose": "Thanks! Which cooperation model would you like to work with?",
-        "reg_recommend_rs": "\n\n💡 Recommendation: for most of our partners, RevShare (RS) delivers the highest long-term income — we recommend trying it first.",
-        "reg_please_use_buttons": "Please choose one of the options above.",
-        "offer_rs": "🎯 For RS we offer you a commission of up to 45%. After your first results, we can also discuss Fix and other models.",
-        "offer_other": "📊 We'll review your statistics. After you complete registration, Tommy will personally contact you to discuss exact terms and amount.",
-        "ask_email": "To continue, send your email:",
-        "ask_username": "Telegram username?",
-        "ask_geo": "Which countries (GEO) do you drive traffic to?",
-        "ask_promo": "What promo materials do you use (banners, promo codes, etc)? If none yet, write \"no\".",
-        "invalid_email": "⚠️ Invalid email format. Please write a correct email address (e.g. name@gmail.com).",
-        "invalid_username": "⚠️ Telegram username must start with @ (e.g. @username). Please try again.",
-        "partner_prompt": "What area do you need help with? (e.g. increasing FTDs, traffic sources, conversion) — write in, I'll advise.",
-        "payment_prompt": "Write your payment-related question. I'll forward it to Tommy if needed.",
-        "other_prompt": "Write your question, I'll answer or pass it to Tommy.",
-        "reply_prefix": "📩 Reply from Tommy:\n\n",
-        "no_guarantee": "\n\n⚠️ Note: I can't guarantee income or payment amounts — those terms are agreed individually with Tommy.",
-        "ai_unavailable": "⚠️ Couldn't connect to the AI right now. Your message was sent directly to Tommy, he'll reply soon.",
+
+        "ask_partner": (
+            "📈 <b>EXISTING PARTNER SUPPORT</b>\n\n"
+            "Describe your question or issue in detail.\n\n"
+            "For example:\n"
+            "• FTD or conversion issue\n"
+            "• Promotional materials\n"
+            "• Individual cooperation terms\n"
+            "• Affiliate account issue\n"
+            "• Technical support\n\n"
+            "📩 Your message will be sent to Tommy."
+        ),
+
+        "ask_payment": (
+            "💳 <b>PAYMENT REQUEST</b>\n\n"
+            "Describe the issue in detail.\n\n"
+            "Where possible, include:\n\n"
+            "🆔 Affiliate ID\n"
+            "💵 Payment amount\n"
+            "📅 Payment date\n"
+            "💳 Payment method\n"
+            "📝 Issue description\n\n"
+            "📩 Your message will be sent to Tommy."
+        ),
+
+        "ask_other": (
+            "✉️ <b>OTHER QUESTION</b>\n\n"
+            "Write your question or request in detail.\n\n"
+            "📩 Your message will be sent to Tommy and the reply "
+            "will appear in this chat."
+        ),
+
+        "sent": (
+            "✅ <b>Your message was sent to Tommy.</b>\n\n"
+            "When Tommy replies, his response will automatically "
+            "appear in this chat."
+        ),
+
+        "reply": "📩 <b>Reply from Tommy:</b>\n\n",
+
+        "reg_source": (
+            "📝 <b>NEW PARTNER REGISTRATION</b>\n\n"
+            "First, register on the official website:\n"
+            f"🔗 {REGISTRATION_URL}\n\n"
+            "Now send your traffic source.\n\n"
+            "For example:\n"
+            "• Telegram channel\n"
+            "• Instagram page\n"
+            "• YouTube channel\n"
+            "• TikTok page\n"
+            "• Website or another traffic source\n\n"
+            "If you do not have a traffic source yet, write “no”.\n\n"
+            "❌ Cancel: /cancel"
+        ),
+
+        "reg_model": "💰 <b>Choose a cooperation model:</b>",
+
+        "reg_email": (
+            "📧 <b>Send your email address:</b>\n\n"
+            "Example: name@gmail.com"
+        ),
+
+        "reg_username": (
+            "🔗 <b>Send your Telegram username:</b>\n\n"
+            "Example: @username"
+        ),
+
+        "reg_geo": (
+            "🌍 <b>Which countries or GEOs do you target?</b>\n\n"
+            "Example: Uzbekistan, CIS, Turkey or another GEO."
+        ),
+
+        "reg_promo": (
+            "📢 <b>Which advertising sources do you use?</b>\n\n"
+            "For example:\n"
+            "• Telegram posts\n"
+            "• Instagram Stories/Reels\n"
+            "• YouTube\n"
+            "• TikTok\n"
+            "• Facebook or Google Ads\n"
+            "• SEO\n\n"
+            "If not decided yet, write “no”."
+        ),
+
+        "invalid_email": (
+            "⚠️ <b>Invalid email address.</b>\n\n"
+            "Send it again in the correct format.\n"
+            "Example: name@gmail.com"
+        ),
+
+        "invalid_username": (
+            "⚠️ <b>Invalid Telegram username.</b>\n\n"
+            "The username must start with @.\n"
+            "Example: @username"
+        ),
+
+        "registered": (
+            "✅ <b>Your information was sent to Tommy!</b>\n\n"
+            "Tommy will review it and contact you through Telegram."
+        ),
+
+        "cancelled": "❌ Registration cancelled.",
+
+        "send_text_or_media": (
+            "⚠️ Send your question as text, image, video, "
+            "voice message or file."
+        ),
     },
 }
 
-MODEL_NAMES = {
-    "uz": ["CPA", "RevShare (RS)", "Hybrid", "Postpay", "Fix"],
-    "ru": ["CPA", "RevShare (RS)", "Hybrid", "Postpay", "Fix"],
-    "en": ["CPA", "RevShare (RS)", "Hybrid", "Postpay", "Fix"],
-}
 
-MODEL_FACTS = {
-    "uz": [
-        "CPA: har bir sifatli o'yinchi (FTD) uchun qat'iy summa; aniq stavka Tommy bilan individual belgilanadi.",
-        "RevShare (RS): referral orqali kelgan o'yinchi daromadidan foiz, hajmi trafik sifatiga qarab 50% gacha; o'yinchi faol bo'lgan har oy davom etadi.",
-        "Hybrid: CPA (FTD'da darhol to'lov) + RevShare (doimiy foiz) birikmasi.",
-        "Postpay: kelishilgan KPI (masalan, aniq sonli sifatli FTD) bajarilgach to'lanadi; barqaror trafik uchun mos.",
-        "Fix: kelishilgan shartlar asosida belgilangan reklama byudjeti; yirik yoki tekshirilgan trafik manbalari uchun, aniq summa Tommy bilan alohida kelishiladi.",
-    ],
-    "ru": [
-        "CPA: фиксированная сумма за каждого качественного игрока (FTD); точная ставка определяется индивидуально с Tommy.",
-        "RevShare (RS): процент от дохода игрока, пришедшего по рефералке, до 50% в зависимости от качества трафика; продолжается каждый месяц, пока игрок активен.",
-        "Hybrid: комбинация CPA (мгновенная выплата при FTD) + RevShare (постоянный процент).",
-        "Postpay: оплата после выполнения согласованных KPI (например, определённого числа качественных FTD); подходит для стабильного трафика.",
-        "Fix: фиксированный рекламный бюджет по согласованным условиям; для крупных или проверенных источников трафика, точная сумма обсуждается отдельно с Tommy.",
-    ],
-    "en": [
-        "CPA: a fixed amount for each qualified player (FTD); the exact rate is set individually with Tommy.",
-        "RevShare (RS): a percentage of revenue from a referred player, up to 50% depending on traffic quality; continues every month the player stays active.",
-        "Hybrid: a combination of CPA (instant payment on FTD) + RevShare (ongoing percentage).",
-        "Postpay: paid after agreed KPIs are met (e.g. a specific number of quality FTDs); suited to stable traffic.",
-        "Fix: a fixed advertising budget based on agreed terms; for large or verified traffic sources, exact amount discussed separately with Tommy.",
-    ],
+CATEGORY_NAMES = {
+    "partner": "📈 Mavjud hamkor yordami",
+    "payment": "💳 To'lov bo'yicha savol",
+    "other": "✉️ Boshqa savol",
+    "free": "💬 Erkin murojaat",
 }
 
 
-# ============================================================
-# 4) AI MEXANIZMI (Claude — botning "miyasi")
-# ============================================================
-
-_ai_client = Anthropic(api_key=ANTHROPIC_API_KEY, timeout=AI_REQUEST_TIMEOUT)
-_conversation_history: dict[int, list[dict]] = defaultdict(list)
-
-TOMMY_CONTACT = "@Tommy_Luckypari"
-
-SYSTEM_PROMPT = {
-    "uz": (
-        "Sen LuckyPari affiliate dasturining AI-yordamchisisan (Tommy jamoasi nomidan). "
-        "Hamkorlarga trafik, FTD oshirish, konversiya, reklama kanallari (Telegram, Instagram, "
-        "Facebook, Google Ads, TikTok, Push/Native Ads va h.k.), hamkorlik modellari (CPA, RevShare, "
-        "Hybrid, Postpay, Fix) va dastur bo'yicha istalgan savolga aniq, amaliy javob ber. "
-        f"Agar kimdir Tommy bilan bog'lanish, uning Telegram manzili yoki kontaktini so'rasa, "
-        f"to'g'ridan-to'g'ri shu username'ni ber: {TOMMY_CONTACT}. "
-        "Agar hamkor FTD past yoki reklama natija bermayapti desa, mustaqil ravishda aniq amaliy "
-        "takliflar ber: landing sahifa sifatini tekshirish, auditoriya segmentatsiyasini aniqlashtirish, "
-        "kreativlarni (banner/matn) A/B testlash, referral bonus yoki konkurs tashkil qilish, "
-        "trafik manbasini diversifikatsiya qilish kabi. "
-        "Javobing qisqa (3-6 jumla), do'stona va professional bo'lsin. "
-        "FORMATLASH: Telegram oddiy matnni ko'rsatadi, Markdown belgilarini emas — shuning uchun "
-        "#, ##, ---, ** kabi belgilarni HECH QACHON ishlatma. Sarlavha kerak bo'lsa mos emoji bilan "
-        "boshlang'ich jumla qil (masalan '🎯 FTD oshirish uchun:'). Ro'yxat kerak bo'lsa oddiy emoji "
-        "yoki raqam bilan boshla (masalan '1)' yoki '✅'), tire (-) yoki yulduzcha ishlatma. "
-        "Har bir javob oxirida foydalanuvchini yana savol berishga tabiiy tarzda taklif qil, "
-        "lekin har safar boshqacha so'zlar bilan — bir xil jumlani takrorlama. "
-        "Hech qachon aniq daromad, to'lov miqdori yoki foizni o'zingdan o'ylab topib aytma — faqat senga "
-        "berilgan faktlarga tayan; kafolatlangan natija va'da qilma. Bunday savol bo'lsa, buni Tommy bilan "
-        "individual kelishish kerakligini ayt. "
-        "Agar savol umuman aloqador bo'lmasa yoki juda maxsus (masalan aniq shartnoma, hisob muammosi) bo'lsa, "
-        "buni Tommy'ga yetkazishingni ayt."
-    ),
-    "ru": (
-        "Ты AI-ассистент партнёрской программы LuckyPari (от команды Tommy). "
-        "Отвечай партнёрам конкретно и практично на вопросы о трафике, росте FTD, конверсии, рекламных каналах "
-        "(Telegram, Instagram, Facebook, Google Ads, TikTok, Push/Native Ads и т.д.), моделях сотрудничества "
-        "(CPA, RevShare, Hybrid, Postpay, Fix) и любые вопросы о программе. "
-        f"Если кто-то спрашивает контакт Tommy, его Telegram или как с ним связаться, "
-        f"сразу дай этот username: {TOMMY_CONTACT}. "
-        "Если партнёр говорит, что FTD низкий или реклама не даёт результата, самостоятельно предложи "
-        "конкретные практические шаги: проверить качество лендинга, уточнить сегментацию аудитории, "
-        "протестировать креативы (баннеры/тексты) A/B-методом, запустить реферальный бонус или конкурс, "
-        "диверсифицировать источники трафика. "
-        "Ответ короткий (3-6 предложений), дружелюбный и профессиональный. "
-        "ФОРМАТИРОВАНИЕ: Telegram показывает обычный текст, а не Markdown — поэтому НИКОГДА не используй "
-        "символы #, ##, ---, **. Если нужен заголовок, начни предложение с подходящего эмодзи "
-        "(например '🎯 Как повысить FTD:'). Для списка используй эмодзи или цифру с скобкой "
-        "(например '1)' или '✅'), не используй тире (-) или звёздочки. "
-        "В конце каждого ответа естественно предложи задать ещё вопрос, но каждый раз другими словами — "
-        "не повторяй одну и ту же фразу. "
-        "Никогда не придумывай конкретный доход, суммы выплат или проценты сам — опирайся только на "
-        "предоставленные тебе факты; не обещай гарантированный результат. Если спрашивают об этом, скажи, "
-        "что это согласовывается индивидуально с Tommy. "
-        "Если вопрос не по теме или слишком специфичен (конкретный договор, проблема с аккаунтом), "
-        "скажи, что передашь это Tommy."
-    ),
-    "en": (
-        "You are the AI assistant of the LuckyPari affiliate program (on behalf of Tommy's team). "
-        "Give partners concrete, practical answers about traffic, increasing FTDs, conversion, ad channels "
-        "(Telegram, Instagram, Facebook, Google Ads, TikTok, Push/Native Ads, etc), cooperation models "
-        "(CPA, RevShare, Hybrid, Postpay, Fix), and any question about the program. "
-        f"If someone asks for Tommy's contact, Telegram, or how to reach him, "
-        f"give them this username directly: {TOMMY_CONTACT}. "
-        "If a partner says FTDs are low or ads aren't performing, independently suggest concrete practical "
-        "steps: check landing page quality, refine audience targeting, A/B test creatives (banners/copy), "
-        "launch a referral bonus or contest, diversify traffic sources. "
-        "Keep answers short (3-6 sentences), friendly and professional. "
-        "FORMATTING: Telegram displays plain text, not Markdown — so NEVER use symbols like #, ##, ---, **. "
-        "If a heading is needed, start a sentence with a fitting emoji instead (e.g. '🎯 To boost FTDs:'). "
-        "For lists, use an emoji or a number with a parenthesis (e.g. '1)' or '✅'), never use dashes (-) "
-        "or asterisks. "
-        "End each answer with a natural invitation to ask more, but phrase it differently each time — "
-        "never repeat the same closing line. "
-        "Never invent specific income, payment amounts, or percentages yourself — rely only on facts "
-        "given to you; never promise a guaranteed result. If asked, say those terms are agreed "
-        "individually with Tommy. "
-        "If the question is unrelated or too specific (a particular contract, account issue), "
-        "say you'll pass it on to Tommy."
-    ),
-}
-
-
-def _trim_history(chat_id: int) -> None:
-    history = _conversation_history[chat_id]
-    if len(history) > AI_HISTORY_LIMIT:
-        del history[: len(history) - AI_HISTORY_LIMIT]
-
-
-def reset_history(chat_id: int) -> None:
-    _conversation_history.pop(chat_id, None)
-
-
-def get_ai_response(chat_id: int, lang: str, user_message: str) -> str | None:
-    """Claude API orqali, oldingi suhbat kontekstini hisobga olib javob oladi."""
-    history = _conversation_history[chat_id]
-    messages = history + [{"role": "user", "content": user_message}]
-
-    try:
-        response = _ai_client.messages.create(
-            model=AI_MODEL,
-            max_tokens=AI_MAX_TOKENS,
-            system=SYSTEM_PROMPT.get(lang, SYSTEM_PROMPT["uz"]),
-            messages=messages,
-        )
-        answer = response.content[0].text.strip()
-    except APITimeoutError:
-        logger.error("AI so'rovi timeout bo'ldi (chat_id=%s)", chat_id)
-        return None
-    except APIError as e:
-        logger.error("AI API xatosi (chat_id=%s): %s", chat_id, e)
-        return None
-    except Exception as e:
-        logger.exception("AI kutilmagan xato (chat_id=%s): %s", chat_id, e)
-        return None
-
-    history.append({"role": "user", "content": user_message})
-    history.append({"role": "assistant", "content": answer})
-    _trim_history(chat_id)
-    return answer
-
-
-def get_model_explanation(chat_id: int, lang: str, model_index: int) -> str | None:
-    """Berilgan hamkorlik modelini AI orqali, tasdiqlangan faktlarga tayanib tushuntiradi."""
-    name = MODEL_NAMES[lang][model_index]
-    facts = MODEL_FACTS[lang][model_index]
-    prompt = {
-        "uz": f"'{name}' hamkorlik modelini menga qiziqarli va batafsil tushuntiring. "
-              f"Faqat quyidagi tasdiqlangan faktlarga tayaning, boshqa raqam o'ylab topmang: {facts}",
-        "ru": f"Объясните мне модель сотрудничества '{name}' подробно и интересно. "
-              f"Опирайтесь только на следующие подтверждённые факты, не придумывайте другие цифры: {facts}",
-        "en": f"Explain the '{name}' cooperation model to me in an engaging, detailed way. "
-              f"Rely only on the following confirmed facts, don't invent other numbers: {facts}",
-    }[lang]
-    return get_ai_response(chat_id, lang, prompt)
+MODEL_NAMES = [
+    "CPA",
+    "RevShare (RS)",
+    "Hybrid",
+    "Postpay",
+    "Fix",
+]
 
 
 # ============================================================
-# 5) HOLAT SAQLASH VA KLAVIATURALAR
+# 4. KLAVIATURALAR
 # ============================================================
 
-user_lang: dict[int, str] = {}
-user_mode: dict[int, str] = {}  # "partner" | "payment" | "other" | None
+def language_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton(
+                "🇺🇿 O'zbek",
+                callback_data="lang:uz",
+            ),
+            InlineKeyboardButton(
+                "🇷🇺 Русский",
+                callback_data="lang:ru",
+            ),
+            InlineKeyboardButton(
+                "🇬🇧 English",
+                callback_data="lang:en",
+            ),
+        ]]
+    )
 
-REG_MODEL, REG_EMAIL, REG_USERNAME, REG_GEO, REG_PROMO = range(5)
 
-
-def main_menu_kb(lang: str) -> InlineKeyboardMarkup:
+def main_keyboard(lang: str) -> InlineKeyboardMarkup:
     t = TEXTS[lang]
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(t["btn_models"], callback_data="models")],
-        [InlineKeyboardButton(t["btn_register"], callback_data="register")],
-        [InlineKeyboardButton(t["btn_partner"], callback_data="partner")],
-        [InlineKeyboardButton(t["btn_payment"], callback_data="payment")],
-        [InlineKeyboardButton(t["btn_other"], callback_data="other")],
-    ])
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    t["models"],
+                    callback_data="menu:models",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    t["register"],
+                    callback_data="register:start",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    t["partner"],
+                    callback_data="menu:partner",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    t["payment"],
+                    callback_data="menu:payment",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    t["other"],
+                    callback_data="menu:other",
+                )
+            ],
+        ]
+    )
 
 
-def lang_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("🇺🇿 O'zbek", callback_data="lang_uz"),
-        InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru"),
-        InlineKeyboardButton("🇬🇧 English", callback_data="lang_en"),
-    ]])
+def back_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton(
+                TEXTS[lang]["back"],
+                callback_data="menu:back",
+            )
+        ]]
+    )
 
 
-def models_kb(lang: str) -> InlineKeyboardMarkup:
-    buttons = [[InlineKeyboardButton(name, callback_data=f"model_{i}")]
-               for i, name in enumerate(MODEL_NAMES[lang])]
-    buttons.append([InlineKeyboardButton(TEXTS[lang]["btn_back"], callback_data="back")])
-    return InlineKeyboardMarkup(buttons)
+def model_keyboard(lang: str) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                name,
+                callback_data=f"register:model:{name}",
+            )
+        ]
+        for name in MODEL_NAMES
+    ]
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                TEXTS[lang]["back"],
+                callback_data="register:cancel",
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(rows)
 
 
-def model_detail_kb(lang: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton(TEXTS[lang]["btn_back"], callback_data="back")]])
-
-
-def reg_model_kb(lang: str) -> InlineKeyboardMarkup:
-    buttons = [[InlineKeyboardButton(name, callback_data=f"regmodel_{i}")]
-               for i, name in enumerate(MODEL_NAMES[lang])]
-    return InlineKeyboardMarkup(buttons)
-
-
-def get_lang(chat_id: int) -> str:
-    return user_lang.get(chat_id, "uz")
-
-
-# ============================================================
-# 6) ADMINGA FORWARD QILISH
-# ============================================================
-
-async def forward_to_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, lang: str, category: str, text: str) -> None:
-    user = None
-    try:
-        user = await context.bot.get_chat(chat_id)
-    except Exception:
-        pass
-    username = f"@{user.username}" if user and user.username else "no username"
-    await context.bot.send_message(
-        chat_id=ADMIN_CHAT_ID,
-        text=f"📌 {category}\nuser_id: {chat_id}\nUsername: {username}\nTil: {lang}\n\n{text}",
+def admin_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📩 Kutilayotgan savollar",
+                    callback_data="admin:pending",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "👥 Yangi hamkorlar",
+                    callback_data="admin:partners",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "📊 Statistika",
+                    callback_data="admin:stats",
+                ),
+                InlineKeyboardButton(
+                    "🔄 Yangilash",
+                    callback_data="admin:home",
+                ),
+            ],
+        ]
     )
 
 
 # ============================================================
-# 7) ASOSIY BUYRUQLAR
+# 5. YORDAMCHI FUNKSIYALAR
 # ============================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Tilni tanlang / Выберите язык / Choose language:", reply_markup=lang_kb())
+def safe(value: object) -> str:
+    return html.escape(str(value or "—"))
 
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    chat_id = update.effective_chat.id
-    lang = get_lang(chat_id)
-    context.user_data["reg"] = {}
-    user_mode[chat_id] = None
-    await update.message.reply_text(TEXTS[lang]["reg_cancelled"], reply_markup=main_menu_kb(lang))
-    return ConversationHandler.END
+def full_name(user) -> str:
+    parts = [
+        user.first_name or "",
+        user.last_name or "",
+    ]
+
+    name = " ".join(
+        part for part in parts
+        if part
+    ).strip()
+
+    return name or "Noma'lum"
 
 
-# ============================================================
-# 8) UMUMIY TUGMALAR (registratsiyaga aloqasiz)
-# ============================================================
+def username_text(user) -> str:
+    if user.username:
+        return f"@{user.username}"
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    chat_id = query.message.chat_id
-    data = query.data
+    return "Username yo'q"
 
-    if data.startswith("lang_"):
-        lang = data.split("_")[1]
-        user_lang[chat_id] = lang
-        user_mode[chat_id] = None
-        reset_history(chat_id)
-        await context.bot.send_message(chat_id=chat_id, text=TEXTS[lang]["welcome"], reply_markup=main_menu_kb(lang))
+
+def get_message_content(
+    message,
+) -> tuple[str, str, str | None]:
+
+    if message.text:
+        return (
+            "text",
+            message.text,
+            None,
+        )
+
+    if message.photo:
+        return (
+            "photo",
+            message.caption or "📷 Rasm yuborildi",
+            message.photo[-1].file_id,
+        )
+
+    if message.video:
+        return (
+            "video",
+            message.caption or "🎥 Video yuborildi",
+            message.video.file_id,
+        )
+
+    if message.document:
+        filename = (
+            message.document.file_name
+            or "Hujjat"
+        )
+
+        return (
+            "document",
+            message.caption or f"📎 {filename}",
+            message.document.file_id,
+        )
+
+    if message.voice:
+        return (
+            "voice",
+            message.caption or "🎙 Ovozli xabar yuborildi",
+            message.voice.file_id,
+        )
+
+    if message.audio:
+        return (
+            "audio",
+            message.caption or "🎵 Audio yuborildi",
+            message.audio.file_id,
+        )
+
+    if message.animation:
+        return (
+            "animation",
+            message.caption or "🎞 GIF yuborildi",
+            message.animation.file_id,
+        )
+
+    return (
+        "unknown",
+        "Qo'llab-quvvatlanmaydigan xabar turi",
+        None,
+    )
+
+
+async def send_admin_media(
+    context: ContextTypes.DEFAULT_TYPE,
+    message_type: str,
+    file_id: str,
+    caption: str,
+):
+    arguments = {
+        "chat_id": ADMIN_CHAT_ID,
+        "caption": caption,
+        "parse_mode": ParseMode.HTML,
+    }
+
+    if message_type == "photo":
+        return await context.bot.send_photo(
+            photo=file_id,
+            **arguments,
+        )
+
+    if message_type == "video":
+        return await context.bot.send_video(
+            video=file_id,
+            **arguments,
+        )
+
+    if message_type == "document":
+        return await context.bot.send_document(
+            document=file_id,
+            **arguments,
+        )
+
+    if message_type == "voice":
+        return await context.bot.send_voice(
+            voice=file_id,
+            **arguments,
+        )
+
+    if message_type == "audio":
+        return await context.bot.send_audio(
+            audio=file_id,
+            **arguments,
+        )
+
+    if message_type == "animation":
+        return await context.bot.send_animation(
+            animation=file_id,
+            **arguments,
+        )
+
+    return None
+
+
+async def send_admin_reply_to_user(
+    context: ContextTypes.DEFAULT_TYPE,
+    target_user_id: int,
+    admin_message,
+) -> None:
+
+    lang = get_user_language(target_user_id)
+    prefix = TEXTS[lang]["reply"]
+
+    if admin_message.text:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=prefix + safe(admin_message.text),
+            parse_mode=ParseMode.HTML,
+        )
         return
 
-    lang = get_lang(chat_id)
+    caption = (
+        prefix
+        + safe(admin_message.caption or "")
+    )
+
+    if admin_message.photo:
+        await context.bot.send_photo(
+            chat_id=target_user_id,
+            photo=admin_message.photo[-1].file_id,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if admin_message.video:
+        await context.bot.send_video(
+            chat_id=target_user_id,
+            video=admin_message.video.file_id,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if admin_message.document:
+        await context.bot.send_document(
+            chat_id=target_user_id,
+            document=admin_message.document.file_id,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if admin_message.voice:
+        await context.bot.send_voice(
+            chat_id=target_user_id,
+            voice=admin_message.voice.file_id,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if admin_message.audio:
+        await context.bot.send_audio(
+            chat_id=target_user_id,
+            audio=admin_message.audio.file_id,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if admin_message.animation:
+        await context.bot.send_animation(
+            chat_id=target_user_id,
+            animation=admin_message.animation.file_id,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    await context.bot.send_message(
+        chat_id=target_user_id,
+        text=prefix + "Xabar yuborildi.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+# ============================================================
+# 6. FOYDALANUVCHI MENYUSI
+# ============================================================
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+    save_user(update)
+    context.user_data.pop("mode", None)
+    context.user_data.pop("registration", None)
+
+    await update.effective_message.reply_text(
+        (
+            "🌐 <b>Tilni tanlang</b>\n"
+            "🌐 <b>Выберите язык</b>\n"
+            "🌐 <b>Choose your language</b>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=language_keyboard(),
+    )
+
+
+async def language_selected(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+    query = update.callback_query
+    await query.answer()
+
+    lang = query.data.split(":", 1)[1]
+
+    save_user(
+        update,
+        language=lang,
+    )
+
+    context.user_data.pop("mode", None)
+    context.user_data.pop("registration", None)
+
+    await query.message.reply_text(
+        TEXTS[lang]["welcome"],
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_keyboard(lang),
+    )
+
+
+async def menu_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    lang = get_user_language(user_id)
     t = TEXTS[lang]
 
-    if data == "models":
-        await context.bot.send_message(chat_id=chat_id, text=t["models_intro"], reply_markup=models_kb(lang))
+    action = query.data.split(":", 1)[1]
 
-    elif data.startswith("model_"):
-        idx = int(data.split("_")[1])
-        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-        explanation = get_model_explanation(chat_id, lang, idx)
-        name = MODEL_NAMES[lang][idx]
-        if explanation:
-            text = f"💰 {name}\n\n{explanation}{t['model_more_questions']}"
-        else:
-            text = f"💰 {name}\n\n{t['ai_unavailable']}"
-        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=model_detail_kb(lang))
+    if action == "back":
+        context.user_data.pop("mode", None)
 
-    elif data == "partner":
-        user_mode[chat_id] = "partner"
-        await context.bot.send_message(chat_id=chat_id, text=t["partner_prompt"])
+        await query.message.reply_text(
+            t["welcome"],
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_keyboard(lang),
+        )
+        return
 
-    elif data == "payment":
-        user_mode[chat_id] = "payment"
-        await context.bot.send_message(chat_id=chat_id, text=t["payment_prompt"] + t["no_guarantee"])
+    if action == "models":
+        context.user_data.pop("mode", None)
 
-    elif data == "other":
-        user_mode[chat_id] = "other"
-        await context.bot.send_message(chat_id=chat_id, text=t["other_prompt"])
+        await query.message.reply_text(
+            t["models_text"],
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_keyboard(lang),
+        )
+        return
 
-    elif data == "back":
-        user_mode[chat_id] = None
-        await context.bot.send_message(chat_id=chat_id, text=t["welcome"], reply_markup=main_menu_kb(lang))
+    context.user_data["mode"] = action
 
-
-# ============================================================
-# 9) RO'YXATDAN O'TISH (ConversationHandler)
-# ============================================================
-
-async def reg_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    chat_id = query.message.chat_id
-    lang = get_lang(chat_id)
-    context.user_data["reg"] = {}
-    await context.bot.send_message(chat_id=chat_id, text=TEXTS[lang]["reg_step1"])
-    return REG_MODEL
-
-
-async def reg_channel_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    chat_id = update.effective_chat.id
-    lang = get_lang(chat_id)
-    context.user_data["reg"]["channel"] = update.message.text.strip()
-    await update.message.reply_text(
-        TEXTS[lang]["reg_model_choose"] + TEXTS[lang]["reg_recommend_rs"],
-        reply_markup=reg_model_kb(lang),
+    prompt_key = {
+        "partner": "ask_partner",
+        "payment": "ask_payment",
+        "other": "ask_other",
+    }.get(
+        action,
+        "ask_other",
     )
+
+    await query.message.reply_text(
+        t[prompt_key],
+        parse_mode=ParseMode.HTML,
+        reply_markup=back_keyboard(lang),
+    )
+
+
+# ============================================================
+# 7. FOYDALANUVCHI MUROJAATINI ADMINGA YUBORISH
+# ============================================================
+
+async def user_message_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+    if not update.effective_user:
+        return
+
+    if not update.effective_message:
+        return
+
+    if update.effective_user.id == ADMIN_CHAT_ID:
+        return
+
+    save_user(update)
+
+    user = update.effective_user
+    message = update.effective_message
+
+    lang = get_user_language(user.id)
+
+    category = context.user_data.get(
+        "mode",
+        "free",
+    )
+
+    (
+        message_type,
+        message_text,
+        file_id,
+    ) = get_message_content(message)
+
+    if message_type == "unknown":
+        await message.reply_text(
+            TEXTS[lang]["send_text_or_media"],
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    question_id = add_question(
+        user_id=user.id,
+        category=category,
+        message_type=message_type,
+        message_text=message_text,
+        file_id=file_id,
+    )
+
+    admin_text = (
+        "📩 <b>YANGI MUROJAAT</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"👤 <b>Ism:</b> {safe(full_name(user))}\n"
+        f"🔗 <b>Username:</b> {safe(username_text(user))}\n"
+        f"🆔 <b>Telegram ID:</b> <code>{user.id}</code>\n"
+        f"🌐 <b>Til:</b> {safe(lang.upper())}\n"
+        f"📂 <b>Bo'lim:</b> "
+        f"{safe(CATEGORY_NAMES.get(category, CATEGORY_NAMES['free']))}\n"
+        f"🔢 <b>Murojaat №:</b> <code>{question_id}</code>\n\n"
+        "💬 <b>Savol:</b>\n"
+        f"{safe(message_text)}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "↩️ <b>Javob berish uchun shu xabarga Reply qiling.</b>"
+    )
+
+    try:
+        if message_type == "text":
+            admin_message = await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=admin_text,
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            admin_message = await send_admin_media(
+                context=context,
+                message_type=message_type,
+                file_id=file_id,
+                caption=admin_text,
+            )
+
+        if admin_message:
+            set_question_admin_message(
+                question_id=question_id,
+                admin_message_id=admin_message.message_id,
+            )
+
+            add_admin_link(
+                admin_message_id=admin_message.message_id,
+                target_user_id=user.id,
+                item_type="question",
+                item_id=question_id,
+            )
+
+        await message.reply_text(
+            TEXTS[lang]["sent"],
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_keyboard(lang),
+        )
+
+    except TelegramError as error:
+        logger.exception(
+            "Admin'ga murojaat yuborilmadi: %s",
+            error,
+        )
+
+        await message.reply_text(
+            (
+                "⚠️ Xabarni yuborishda texnik xato yuz berdi.\n"
+                "Iltimos, birozdan keyin qayta urinib ko'ring."
+            )
+        )
+
+    context.user_data.pop("mode", None)
+
+
+# ============================================================
+# 8. YANGI HAMKOR RO'YXATDAN O'TISHI
+# ============================================================
+
+async def registration_start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+
+    query = update.callback_query
+    await query.answer()
+
+    lang = get_user_language(
+        query.from_user.id
+    )
+
+    context.user_data["registration"] = {}
+    context.user_data.pop("mode", None)
+
+    await query.message.reply_text(
+        TEXTS[lang]["reg_source"],
+        parse_mode=ParseMode.HTML,
+    )
+
+    return REG_SOURCE
+
+
+async def registration_source_received(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+
+    lang = get_user_language(
+        update.effective_user.id
+    )
+
+    registration = context.user_data.setdefault(
+        "registration",
+        {},
+    )
+
+    registration["source"] = (
+        update.effective_message.text.strip()
+    )
+
+    await update.effective_message.reply_text(
+        TEXTS[lang]["reg_model"],
+        parse_mode=ParseMode.HTML,
+        reply_markup=model_keyboard(lang),
+    )
+
     return REG_MODEL
 
 
-async def reg_model_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def registration_model_selected(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+
     query = update.callback_query
     await query.answer()
-    chat_id = query.message.chat_id
-    lang = get_lang(chat_id)
-    idx = int(query.data.split("_")[1])
-    context.user_data["reg"]["model"] = MODEL_NAMES[lang][idx]
-    offer = TEXTS[lang]["offer_rs"] if idx == 1 else TEXTS[lang]["offer_other"]
-    await context.bot.send_message(chat_id=chat_id, text=offer + "\n\n" + TEXTS[lang]["ask_email"])
+
+    lang = get_user_language(
+        query.from_user.id
+    )
+
+    model = query.data.split(
+        ":",
+        2,
+    )[2]
+
+    registration = context.user_data.setdefault(
+        "registration",
+        {},
+    )
+
+    registration["model"] = model
+
+    await query.message.reply_text(
+        TEXTS[lang]["reg_email"],
+        parse_mode=ParseMode.HTML,
+    )
+
     return REG_EMAIL
 
 
-async def reg_email_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    chat_id = update.effective_chat.id
-    lang = get_lang(chat_id)
-    text = update.message.text.strip()
-    if not is_valid_email(text):
-        await update.message.reply_text(TEXTS[lang]["invalid_email"])
-        return REG_EMAIL
-    context.user_data["reg"]["email"] = text
-    await update.message.reply_text(TEXTS[lang]["ask_username"])
-    return REG_USERNAME
+async def registration_invalid_model(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
 
-
-async def reg_username_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    chat_id = update.effective_chat.id
-    lang = get_lang(chat_id)
-    text = update.message.text.strip()
-    if not is_valid_username(text):
-        await update.message.reply_text(TEXTS[lang]["invalid_username"])
-        return REG_USERNAME
-    context.user_data["reg"]["user"] = text
-    await update.message.reply_text(TEXTS[lang]["ask_geo"])
-    return REG_GEO
-
-
-async def reg_geo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    chat_id = update.effective_chat.id
-    lang = get_lang(chat_id)
-    context.user_data["reg"]["geo"] = update.message.text.strip()
-    await update.message.reply_text(TEXTS[lang]["ask_promo"])
-    return REG_PROMO
-
-
-async def reg_promo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    chat_id = update.effective_chat.id
-    lang = get_lang(chat_id)
-    reg = context.user_data.get("reg", {})
-    reg["promo"] = update.message.text.strip()
-
-    await forward_to_admin(
-        context, chat_id, lang, "🆕 YANGI HAMKOR / NEW PARTNER",
-        f"Email: {reg.get('email')}\n"
-        f"User: {reg.get('user')}\n"
-        f"Kanal: {reg.get('channel')}\n"
-        f"Rs: {reg.get('model')}\n"
-        f"Geo: {reg.get('geo')}\n"
-        f"Promo: {reg.get('promo')}",
+    lang = get_user_language(
+        update.effective_user.id
     )
-    await update.message.reply_text(TEXTS[lang]["reg_thanks"], reply_markup=main_menu_kb(lang))
-    context.user_data["reg"] = {}
-    return ConversationHandler.END
 
+    await update.effective_message.reply_text(
+        TEXTS[lang]["reg_model"],
+        parse_mode=ParseMode.HTML,
+        reply_markup=model_keyboard(lang),
+    )
 
-async def reg_invalid_model_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    chat_id = update.effective_chat.id
-    lang = get_lang(chat_id)
-    reg = context.user_data.setdefault("reg", {})
-    if "channel" not in reg:
-        return await reg_channel_received(update, context)
-    await update.message.reply_text(TEXTS[lang]["reg_please_use_buttons"], reply_markup=reg_model_kb(lang))
     return REG_MODEL
 
 
-registration_conv = ConversationHandler(
-    entry_points=[CallbackQueryHandler(reg_entry, pattern="^register$")],
-    states={
-        REG_MODEL: [
-            CallbackQueryHandler(reg_model_chosen, pattern="^regmodel_"),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, reg_invalid_model_step),
-        ],
-        REG_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_email_received)],
-        REG_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_username_received)],
-        REG_GEO: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_geo_received)],
-        REG_PROMO: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_promo_received)],
-    },
-    fallbacks=[CommandHandler("cancel", cancel)],
-)
+async def registration_email_received(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+
+    lang = get_user_language(
+        update.effective_user.id
+    )
+
+    email = update.effective_message.text.strip()
+
+    if not EMAIL_RE.match(email):
+        await update.effective_message.reply_text(
+            TEXTS[lang]["invalid_email"],
+            parse_mode=ParseMode.HTML,
+        )
+
+        return REG_EMAIL
+
+    context.user_data["registration"]["email"] = email
+
+    await update.effective_message.reply_text(
+        TEXTS[lang]["reg_username"],
+        parse_mode=ParseMode.HTML,
+    )
+
+    return REG_USERNAME
+
+
+async def registration_username_received(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+
+    lang = get_user_language(
+        update.effective_user.id
+    )
+
+    username = (
+        update.effective_message.text.strip()
+    )
+
+    if not USERNAME_RE.match(username):
+        await update.effective_message.reply_text(
+            TEXTS[lang]["invalid_username"],
+            parse_mode=ParseMode.HTML,
+        )
+
+        return REG_USERNAME
+
+    context.user_data["registration"][
+        "telegram_username"
+    ] = username
+
+    await update.effective_message.reply_text(
+        TEXTS[lang]["reg_geo"],
+        parse_mode=ParseMode.HTML,
+    )
+
+    return REG_GEO
+
+
+async def registration_geo_received(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+
+    lang = get_user_language(
+        update.effective_user.id
+    )
+
+    context.user_data["registration"]["geo"] = (
+        update.effective_message.text.strip()
+    )
+
+    await update.effective_message.reply_text(
+        TEXTS[lang]["reg_promo"],
+        parse_mode=ParseMode.HTML,
+    )
+
+    return REG_PROMO
+
+
+async def registration_promo_received(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+
+    user = update.effective_user
+    lang = get_user_language(user.id)
+
+    registration = context.user_data.get(
+        "registration",
+        {},
+    )
+
+    registration["promo"] = (
+        update.effective_message.text.strip()
+    )
+
+    partner_id = add_partner(
+        user_id=user.id,
+        source=registration.get("source", "—"),
+        model=registration.get("model", "—"),
+        email=registration.get("email", "—"),
+        telegram_username=registration.get(
+            "telegram_username",
+            "—",
+        ),
+        geo=registration.get("geo", "—"),
+        promo=registration.get("promo", "—"),
+    )
+
+    admin_text = (
+        "👥 <b>YANGI HAMKOR</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"👤 <b>Ism:</b> {safe(full_name(user))}\n"
+        f"🔗 <b>Telegram:</b> "
+        f"{safe(registration.get('telegram_username'))}\n"
+        f"🆔 <b>Telegram ID:</b> <code>{user.id}</code>\n"
+        f"📧 <b>Email:</b> {safe(registration.get('email'))}\n"
+        f"🌍 <b>GEO:</b> {safe(registration.get('geo'))}\n"
+        f"💰 <b>Model:</b> {safe(registration.get('model'))}\n"
+        f"📢 <b>Trafik manbasi:</b> "
+        f"{safe(registration.get('source'))}\n"
+        f"🎯 <b>Reklama usuli:</b> "
+        f"{safe(registration.get('promo'))}\n"
+        f"🔢 <b>Hamkor №:</b> <code>{partner_id}</code>\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "↩️ <b>Hamkorga yozish uchun shu xabarga Reply qiling.</b>"
+    )
+
+    try:
+        admin_message = await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=admin_text,
+            parse_mode=ParseMode.HTML,
+        )
+
+        set_partner_admin_message(
+            partner_id=partner_id,
+            admin_message_id=admin_message.message_id,
+        )
+
+        add_admin_link(
+            admin_message_id=admin_message.message_id,
+            target_user_id=user.id,
+            item_type="partner",
+            item_id=partner_id,
+        )
+
+        await update.effective_message.reply_text(
+            TEXTS[lang]["registered"],
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_keyboard(lang),
+        )
+
+    except TelegramError as error:
+        logger.exception(
+            "Yangi hamkor admin'ga yuborilmadi: %s",
+            error,
+        )
+
+        await update.effective_message.reply_text(
+            (
+                "⚠️ Ma'lumotlarni yuborishda texnik xato yuz berdi.\n"
+                "Iltimos, keyinroq qayta urinib ko'ring."
+            )
+        )
+
+    context.user_data.pop(
+        "registration",
+        None,
+    )
+
+    return ConversationHandler.END
+
+
+async def registration_cancel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+
+    user_id = update.effective_user.id
+    lang = get_user_language(user_id)
+
+    context.user_data.pop(
+        "registration",
+        None,
+    )
+
+    if update.callback_query:
+        await update.callback_query.answer()
+
+        await update.callback_query.message.reply_text(
+            TEXTS[lang]["cancelled"],
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_keyboard(lang),
+        )
+    else:
+        await update.effective_message.reply_text(
+            TEXTS[lang]["cancelled"],
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_keyboard(lang),
+        )
+
+    return ConversationHandler.END
 
 
 # ============================================================
-# 10) ERKIN XABARLAR (AI orqali javob)
+# 9. ADMIN REPLY ORQALI JAVOB BERISHI
 # ============================================================
 
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.message.chat_id
-    lang = get_lang(chat_id)
-    t = TEXTS[lang]
-    text = update.message.text
+async def admin_reply_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
 
-    if chat_id == ADMIN_CHAT_ID and update.message.reply_to_message:
-        original = update.message.reply_to_message.text or ""
-        if "user_id:" in original:
-            try:
-                target_id = int(original.split("user_id:")[1].split()[0])
-                target_lang = get_lang(target_id)
-                await context.bot.send_message(
-                    chat_id=target_id,
-                    text=TEXTS[target_lang]["reply_prefix"] + text,
-                )
-            except (ValueError, IndexError):
-                pass
+    admin_message = update.effective_message
+    admin_user = update.effective_user
+
+    if not admin_user:
         return
 
-    # Guruh/superguruh xabarlari: bot faqat @username orqali tegilganda yoki
-    # o'zining xabariga reply qilinganda javob beradi — aks holda e'tibor bermaydi.
-    if update.effective_chat.type in ("group", "supergroup"):
-        bot_username = (context.bot.username or "").lower()
-        mentioned = bool(bot_username) and f"@{bot_username}" in (text or "").lower()
-        is_reply_to_bot = (
-            update.message.reply_to_message is not None
-            and update.message.reply_to_message.from_user is not None
-            and update.message.reply_to_message.from_user.id == context.bot.id
+    if admin_user.id != ADMIN_CHAT_ID:
+        return
+
+    if not admin_message:
+        return
+
+    if not admin_message.reply_to_message:
+        return
+
+    original_admin_message_id = (
+        admin_message.reply_to_message.message_id
+    )
+
+    link = get_admin_link(
+        original_admin_message_id
+    )
+
+    if not link:
+        await admin_message.reply_text(
+            (
+                "⚠️ <b>Javob yuborilmadi.</b>\n\n"
+                "Foydalanuvchiga javob berish uchun bot yuborgan "
+                "murojaat yoki yangi hamkor xabarining ustiga "
+                "<b>Reply</b> qilib yozing."
+            ),
+            parse_mode=ParseMode.HTML,
         )
-        if not (mentioned or is_reply_to_bot):
-            return
-        if mentioned:
-            text = re.sub(rf"@{re.escape(bot_username)}", "", text, flags=re.IGNORECASE).strip()
-        if not text:
-            return
+        return
 
-    mode = user_mode.get(chat_id)
-    category_map = {
-        "partner": "HAMKOR SO'ROVI / PARTNER REQUEST",
-        "payment": "TO'LOV SAVOLI / PAYMENT QUESTION",
-        "other": "BOSHQA SAVOL / OTHER QUESTION",
-    }
+    target_user_id = int(
+        link["target_user_id"]
+    )
 
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-    ai_answer = get_ai_response(chat_id, lang, text)
-    urgent = is_urgent(text)
-    category = category_map.get(mode, "ERKIN SAVOL / FREE QUESTION")
-    # Faqat "Boshqa savol" bo'limidan yozilgan xabarlar (yoki dolzarb mavzular) adminga yuboriladi;
-    # "Hamkorlik" va "To'lov" bo'limlarida AI mustaqil javob beradi, forward qilinmaydi.
-    should_forward = (mode == "other") or urgent
+    try:
+        await send_admin_reply_to_user(
+            context=context,
+            target_user_id=target_user_id,
+            admin_message=admin_message,
+        )
 
-    if ai_answer:
-        await update.message.reply_text(ai_answer, reply_markup=model_detail_kb(lang))
-        if should_forward:
-            label = "🚨 DOLZARB / URGENT" if urgent else "📩 XABAR / MESSAGE"
-            await forward_to_admin(
-                context, chat_id, lang, f"{label} — {category}",
-                f"Savol: {text}\n\nAI javobi: {ai_answer}",
+        if (
+            link["item_type"] == "question"
+            and link["item_id"]
+        ):
+            mark_question_answered(
+                int(link["item_id"])
             )
-    else:
-        await forward_to_admin(context, chat_id, lang, f"⚠️ AI JAVOB BERMADI — {category}", text)
-        await update.message.reply_text(t["ai_unavailable"], reply_markup=model_detail_kb(lang))
 
-    if mode is not None:
-        user_mode[chat_id] = None
+        elif (
+            link["item_type"] == "partner"
+            and link["item_id"]
+        ):
+            with db_connect() as connection:
+                connection.execute(
+                    """
+                    UPDATE partners
+                    SET status = 'contacted'
+                    WHERE id = ?
+                    """,
+                    (
+                        int(link["item_id"]),
+                    ),
+                )
+
+        await admin_message.reply_text(
+            (
+                "✅ <b>JAVOB YUBORILDI</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n\n"
+                f"👤 <b>Foydalanuvchi ID:</b> "
+                f"<code>{target_user_id}</code>\n"
+                "📩 <b>Holat:</b> Muvaffaqiyatli yuborildi"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+
+    except Forbidden:
+        await admin_message.reply_text(
+            (
+                "❌ <b>Javob yuborilmadi.</b>\n\n"
+                "Foydalanuvchi botni bloklagan yoki bot bilan "
+                "suhbatni o'chirgan."
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+
+    except TelegramError as error:
+        logger.exception(
+            "Admin javobi yuborilmadi: %s",
+            error,
+        )
+
+        await admin_message.reply_text(
+            (
+                "❌ <b>Javob yuborilmadi.</b>\n\n"
+                f"<code>{safe(error)}</code>"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
 
 
 # ============================================================
-# 11) XATOLARNI BOSHQARISH VA ISHGA TUSHIRISH
+# 10. ADMIN PANEL
 # ============================================================
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error("Kutilmagan xato: %s", context.error, exc_info=context.error)
+def admin_panel_text() -> str:
+    stats = get_statistics()
+
+    return (
+        "🛠 <b>TOMMY ADMIN PANEL</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"👤 <b>Bot foydalanuvchilari:</b> "
+        f"{stats['users']}\n"
+        f"👥 <b>Jami yangi hamkorlar:</b> "
+        f"{stats['partners']}\n"
+        f"🆕 <b>Ko'rilmagan hamkorlar:</b> "
+        f"{stats['new_partners']}\n"
+        f"⏳ <b>Javob kutilayotgan savollar:</b> "
+        f"{stats['pending']}\n"
+        f"✅ <b>Javob berilgan savollar:</b> "
+        f"{stats['answered']}\n\n"
+        "👇 Kerakli bo'limni tanlang:"
+    )
+
+
+async def admin_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+    if not update.effective_user:
+        return
+
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+
+    await update.effective_message.reply_text(
+        admin_panel_text(),
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_keyboard(),
+    )
+
+
+async def admin_panel_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+    query = update.callback_query
+
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer(
+            "Sizga ruxsat berilmagan.",
+            show_alert=True,
+        )
+        return
+
+    await query.answer()
+
+    action = query.data.split(":", 1)[1]
+
+    if action in {
+        "home",
+        "stats",
+    }:
+        await query.message.reply_text(
+            admin_panel_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=admin_keyboard(),
+        )
+        return
+
+    if action == "pending":
+        with db_connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    q.*,
+                    u.first_name,
+                    u.last_name,
+                    u.username
+                FROM questions q
+                LEFT JOIN users u
+                    ON u.user_id = q.user_id
+                WHERE q.status = 'pending'
+                ORDER BY q.id DESC
+                LIMIT 10
+                """
+            ).fetchall()
+
+        if not rows:
+            await query.message.reply_text(
+                "✅ Javob kutilayotgan murojaatlar yo'q.",
+                reply_markup=admin_keyboard(),
+            )
+            return
+
+        text = (
+            "📩 <b>OXIRGI 10 TA KUTILAYOTGAN SAVOL</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+        )
+
+        for row in rows:
+            name_parts = [
+                row["first_name"],
+                row["last_name"],
+            ]
+
+            name = " ".join(
+                part
+                for part in name_parts
+                if part
+            ) or "Noma'lum"
+
+            username = (
+                f"@{row['username']}"
+                if row["username"]
+                else "username yo'q"
+            )
+
+            question_text = (
+                row["message_text"]
+                or "Media xabar"
+            )
+
+            short_text = question_text[:150]
+
+            text += (
+                f"🔢 <b>№{row['id']}</b>\n"
+                f"👤 {safe(name)}\n"
+                f"🔗 {safe(username)}\n"
+                f"📂 "
+                f"{safe(CATEGORY_NAMES.get(row['category'], row['category']))}\n"
+                f"💬 {safe(short_text)}\n"
+                f"📅 {safe(row['created_at'])}\n\n"
+            )
+
+        text += (
+            "━━━━━━━━━━━━━━━━━━\n"
+            "↩️ Javob berish uchun original murojaat "
+            "xabarining ustiga Reply qiling."
+        )
+
+        await query.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=admin_keyboard(),
+        )
+        return
+
+    if action == "partners":
+        with db_connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM partners
+                ORDER BY id DESC
+                LIMIT 10
+                """
+            ).fetchall()
+
+        if not rows:
+            await query.message.reply_text(
+                "👥 Hozircha yangi hamkorlar yo'q.",
+                reply_markup=admin_keyboard(),
+            )
+            return
+
+        text = (
+            "👥 <b>OXIRGI 10 TA YANGI HAMKOR</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+        )
+
+        for row in rows:
+            if row["status"] == "new":
+                status = "🆕 Yangi"
+            else:
+                status = "✅ Bog'lanilgan"
+
+            text += (
+                f"🔢 <b>№{row['id']}</b>\n"
+                f"🔗 {safe(row['telegram_username'])}\n"
+                f"📧 {safe(row['email'])}\n"
+                f"🌍 {safe(row['geo'])}\n"
+                f"💰 {safe(row['model'])}\n"
+                f"📢 {safe(row['source'])}\n"
+                f"📌 {status}\n"
+                f"📅 {safe(row['created_at'])}\n\n"
+            )
+
+        await query.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=admin_keyboard(),
+        )
+
+
+# ============================================================
+# 11. XATOLARNI USHLASH
+# ============================================================
+
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+    logger.error(
+        "Kutilmagan bot xatosi: %s",
+        context.error,
+        exc_info=context.error,
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=(
+                "⚠️ <b>BOT XATOSI</b>\n\n"
+                f"<code>{safe(context.error)}</code>"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        logger.exception(
+            "Xato haqida admin'ga xabar yuborilmadi."
+        )
+
+
+# ============================================================
+# 12. BOTNI YIG'ISH VA ISHGA TUSHIRISH
+# ============================================================
+
+def build_application() -> Application:
+    application = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
+    registration_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(
+                registration_start,
+                pattern=r"^register:start$",
+            )
+        ],
+
+        states={
+            REG_SOURCE: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    registration_source_received,
+                )
+            ],
+
+            REG_MODEL: [
+                CallbackQueryHandler(
+                    registration_model_selected,
+                    pattern=r"^register:model:",
+                ),
+
+                MessageHandler(
+                    filters.ALL
+                    & ~filters.COMMAND,
+                    registration_invalid_model,
+                ),
+            ],
+
+            REG_EMAIL: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    registration_email_received,
+                )
+            ],
+
+            REG_USERNAME: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    registration_username_received,
+                )
+            ],
+
+            REG_GEO: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    registration_geo_received,
+                )
+            ],
+
+            REG_PROMO: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    registration_promo_received,
+                )
+            ],
+        },
+
+        fallbacks=[
+            CommandHandler(
+                "cancel",
+                registration_cancel,
+            ),
+
+            CallbackQueryHandler(
+                registration_cancel,
+                pattern=r"^register:cancel$",
+            ),
+        ],
+
+        allow_reentry=True,
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "start",
+            start,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "admin",
+            admin_command,
+        )
+    )
+
+    application.add_handler(
+        registration_handler
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            language_selected,
+            pattern=r"^lang:",
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            menu_handler,
+            pattern=r"^menu:",
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            admin_panel_callback,
+            pattern=r"^admin:",
+        )
+    )
+
+    # Adminning Reply xabari oddiy foydalanuvchi xabaridan
+    # oldin ushlanishi kerak.
+    application.add_handler(
+        MessageHandler(
+            filters.User(
+                user_id=ADMIN_CHAT_ID
+            )
+            & filters.REPLY
+            & (
+                filters.TEXT
+                | filters.PHOTO
+                | filters.VIDEO
+                | filters.Document.ALL
+                | filters.VOICE
+                | filters.AUDIO
+                | filters.ANIMATION
+            ),
+            admin_reply_handler,
+        )
+    )
+
+    application.add_handler(
+        MessageHandler(
+            ~filters.COMMAND
+            & ~filters.User(
+                user_id=ADMIN_CHAT_ID
+            )
+            & (
+                filters.TEXT
+                | filters.PHOTO
+                | filters.VIDEO
+                | filters.Document.ALL
+                | filters.VOICE
+                | filters.AUDIO
+                | filters.ANIMATION
+            ),
+            user_message_handler,
+        )
+    )
+
+    application.add_error_handler(
+        error_handler
+    )
+
+    return application
 
 
 def main() -> None:
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    init_db()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(registration_conv)
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    app.add_error_handler(error_handler)
+    application = build_application()
 
-    logger.info("LuckyPari support bot ishga tushdi...")
-    app.run_polling()
+    logger.info(
+        "Tommy Partners Bot ishga tushdi."
+    )
+
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=False,
+    )
 
 
 if __name__ == "__main__":
