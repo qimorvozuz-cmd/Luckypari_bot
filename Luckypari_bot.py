@@ -2173,8 +2173,11 @@ async def registration_geo_received(
         ),
         parse_mode=ParseMode.HTML,
     )
-  return REG_PROMO
-  async def registration_promo_received(
+
+    return REG_PROMO
+
+
+async def registration_promo_received(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
