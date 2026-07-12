@@ -2067,9 +2067,8 @@ async def registration_model_selected(
         1,
     )[1]
 
-    context.user_data[
-        "registration"
-    ]["model"] = model
+    registration = context.user_data.setdefault("registration", {})
+registration["model"] = model
 
     await query.message.reply_text(
         (
@@ -2105,8 +2104,8 @@ async def registration_email_received(
         return REG_EMAIL
 
     context.user_data[
-        "registration"
-    ]["email"] = email
+        registration = context.user_data.setdefault("registration", {})
+registration["email"] = email
 
     await update.effective_message.reply_text(
         (
@@ -2142,8 +2141,8 @@ async def registration_username_received(
         return REG_USERNAME
 
     context.user_data[
-        "registration"
-    ]["telegram_username"] = username_value
+        registration = context.user_data.setdefault("registration", {})
+registration["telegram_username"] = username_value
 
     await update.effective_message.reply_text(
         (
@@ -2160,11 +2159,11 @@ async def registration_geo_received(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
 
-    context.user_data[
-        "registration"
-    ]["geo"] = (
-        update.effective_message.text.strip()
-    )
+    contextregistration = context.user_data.setdefault("registration", {})
+registration["geo"] = (
+    update.effective_message.text.strip()
+).user_data[
+        
 
     await update.effective_message.reply_text(
         (
