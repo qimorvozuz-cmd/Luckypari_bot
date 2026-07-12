@@ -777,7 +777,6 @@ TEXTS = {
         ),
     },
 }
-
     "en": {
         "choose_language": "🌐 <b>Choose your language:</b>",
 
